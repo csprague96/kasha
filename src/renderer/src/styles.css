@@ -1,0 +1,185 @@
+@import 'tailwindcss';
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+/*
+ * Palette: warm paper neutrals so long notes read like a document, one deep
+ * blue for actions, orange reserved for "recording", oxblood for tags.
+ */
+:root {
+  --bg: #f6f5f2;
+  --surface: #ffffff;
+  --sidebar: #efede8;
+  --fg: #1b1d21;
+  --muted: #5f636a;
+  --border: #e1ded8;
+  --primary: #064789;
+  --primary-fg: #ffffff;
+  --record: #fc814a;
+  --ok: #3e6b52;
+  --tag: #f4e8ef;
+  --tag-fg: #700548;
+  --destructive: #a4161a;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b;
+    --surface: #1b1f24;
+    --sidebar: #101316;
+    --fg: #eceae6;
+    --muted: #9aa0a8;
+    --border: #2a2f36;
+    --primary: #6fa3db;
+    --primary-fg: #0b1220;
+    --record: #fc814a;
+    --ok: #61c9a8;
+    --tag: #2a1b26;
+    --tag-fg: #e59bc8;
+    --destructive: #f07167;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-surface: var(--surface);
+  --color-sidebar: var(--sidebar);
+  --color-foreground: var(--fg);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-fg);
+  --color-record: var(--record);
+  --color-ok: var(--ok);
+  --color-tag: var(--tag);
+  --color-tag-foreground: var(--tag-fg);
+  --color-destructive: var(--destructive);
+  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+  * {
+    border-color: var(--border);
+  }
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0ms !important;
+      animation-duration: 0ms !important;
+    }
+  }
+}
+
+/* Note editor. Body text is sized for reading, not for UI chrome. */
+.note-editor .ProseMirror {
+  outline: none;
+  font-size: 16px;
+  line-height: 1.6;
+  max-width: 68ch;
+  min-height: 40vh;
+  padding-bottom: 96px;
+}
+.note-editor .ProseMirror > * + * {
+  margin-top: 0.6em;
+}
+.note-editor .ProseMirror h1,
+.note-editor .ProseMirror h2,
+.note-editor .ProseMirror h3 {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.note-editor .ProseMirror h2 {
+  margin-top: 1.6em;
+}
+.note-editor .ProseMirror > h2:first-child {
+  margin-top: 0;
+}
+.note-editor .ProseMirror ul {
+  list-style: disc;
+  padding-left: 1.25em;
+}
+.note-editor .ProseMirror ol {
+  list-style: decimal;
+  padding-left: 1.25em;
+}
+.note-editor .ProseMirror li + li {
+  margin-top: 0.25em;
+}
+.note-editor .ProseMirror ul[data-type='taskList'] {
+  list-style: none;
+  padding-left: 0;
+}
+.note-editor .ProseMirror ul[data-type='taskList'] li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.note-editor .ProseMirror ul[data-type='taskList'] li > label {
+  margin-top: 0.3em;
+  flex: none;
+}
+.note-editor .ProseMirror ul[data-type='taskList'] input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+.note-editor .ProseMirror ul[data-type='taskList'] li[data-checked='true'] > div {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+/* Inline code is how timestamps are stored: `12:40` */
+.note-editor .ProseMirror code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-inline-end: 0.4em;
+}
+.note-editor .ProseMirror img {
+  max-width: min(100%, 520px);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.note-editor .ProseMirror img.ProseMirror-selectednode {
+  outline: 2px solid var(--primary);
+}
+.note-editor .ProseMirror blockquote {
+  border-inline-start: 2px solid var(--border);
+  padding-inline-start: 12px;
+  color: var(--muted);
+}
+.note-editor .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: var(--muted);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
