@@ -4,8 +4,8 @@ import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { SetupStatus } from '@shared/types'
-import { paths } from './store'
+import type { SetupStatus, SpeechModelId } from '@shared/types'
+import { getSettings, paths } from './store'
 
 // Everything is pinned by SHA-256 so a tampered or truncated file is rejected.
 // whisper.cpp 1.9.4 Windows binaries: whisper-cli, parakeet-cli and the VAD tool.
@@ -14,18 +14,54 @@ const WHISPER_ZIP = {
   size: 8_573_270,
   sha256: 'f9ec6c52a2e949b62ab51fa21d0d497958f9e41c3010c157c4e42932d5316f3c'
 }
-// NVIDIA Parakeet TDT 0.6B v3, 4-bit: about four times faster than Whisper
-// small on the CPU, with word timings built in. Converted by the whisper.cpp team.
-const PARAKEET = {
-  name: 'ggml-parakeet-tdt-0.6b-v3-q4_0.bin',
-  url: 'https://huggingface.co/ggml-org/parakeet-GGUF/resolve/main/ggml-parakeet-tdt-0.6b-v3-q4_0.bin',
-  size: 355_615_679,
-  sha256: 'aa7fe2f5fb47d863ca23e8b1d490632d63a2599f515268b6d6bd656158dad45e'
+interface SpeechModelFile {
+  engine: 'parakeet' | 'whisper'
+  name: string
+  url: string
+  size: number
+  sha256: string
+  /** Whisper's attention-alignment preset for word timings (--dtw). */
+  dtw?: string
 }
-// Whisper small.en, 5-bit. No longer downloaded; still used where it's already installed and Parakeet isn't.
-const WHISPER_MODEL = {
+
+/**
+ * The speech models the user can choose from (Settings > Transcription). All
+ * converted by the whisper.cpp team. Parakeet (NVIDIA TDT 0.6B v3) is about
+ * four times faster than Whisper small on the CPU, with word timings built in.
+ */
+const SPEECH: Record<SpeechModelId, SpeechModelFile> = {
+  parakeet: {
+    engine: 'parakeet',
+    name: 'ggml-parakeet-tdt-0.6b-v3-q4_0.bin',
+    url: 'https://huggingface.co/ggml-org/parakeet-GGUF/resolve/main/ggml-parakeet-tdt-0.6b-v3-q4_0.bin',
+    size: 355_615_679,
+    sha256: 'aa7fe2f5fb47d863ca23e8b1d490632d63a2599f515268b6d6bd656158dad45e'
+  },
+  'parakeet-hq': {
+    engine: 'parakeet',
+    name: 'ggml-parakeet-tdt-0.6b-v3-q8_0.bin',
+    url: 'https://huggingface.co/ggml-org/parakeet-GGUF/resolve/main/ggml-parakeet-tdt-0.6b-v3-q8_0.bin',
+    size: 668_757_119,
+    sha256: '4d64e9e96c2792186d072fde0034df0ad670cf680a2f53069052ead827fd600e'
+  },
+  'whisper-medium': {
+    engine: 'whisper',
+    name: 'ggml-medium.en-q5_0.bin',
+    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en-q5_0.bin',
+    size: 539_225_533,
+    sha256: '76733e26ad8fe1c7a5bf7531a9d41917b2adc0f20f2e4f5531688a8c6cd88eb0',
+    dtw: 'medium.en'
+  }
+}
+// Whisper small.en, 5-bit: the first model Kasha shipped. No longer downloaded;
+// still used where it's installed and nothing newer is.
+const WHISPER_SMALL: SpeechModelFile = {
+  engine: 'whisper',
   name: 'ggml-small.en-q5_1.bin',
-  size: 190_098_681
+  url: '',
+  size: 190_098_681,
+  sha256: '',
+  dtw: 'small.en'
 }
 // Silero voice activity detection: finds where speech starts and stops.
 const VAD = {
@@ -44,17 +80,19 @@ const SEGMENTATION = {
   name: 'pyannote-segmentation-3.0.int8.onnx',
   fileSize: 1_540_506
 }
-// Voice embeddings for telling speakers apart and recognising them later: 3D-Speaker CAM++, English.
+// Voice embeddings for telling speakers apart and recognising them later:
+// 3D-Speaker ERes2Net, English. On real Teams audio it separates voices that
+// CAM++ (the first model Kasha used) ran together: different people score
+// 0.1-0.2 alike and the same person 0.7-0.8, where CAM++ gave 0.44 and 0.88.
+// TitaNet-large agreed with it exactly at four times the size.
 const EMBEDDING = {
-  name: '3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx',
-  url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx',
-  size: 29_596_978,
-  sha256: '357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b'
+  name: '3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx',
+  url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx',
+  size: 26_485_263,
+  sha256: 'c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5'
 }
 
 export const whisperPaths = {
-  model: () => join(paths.bin(), WHISPER_MODEL.name),
-  parakeet: () => join(paths.bin(), PARAKEET.name),
   vad: () => join(paths.bin(), VAD.name),
   cli: () => findFile(paths.bin(), 'whisper-cli.exe'),
   parakeetCli: () => findFile(paths.bin(), 'parakeet-cli.exe'),
@@ -86,15 +124,37 @@ const hasFile = (file: string, size: number) => existsSync(file) && statSync(fil
 
 const toolsReady = () => !!whisperPaths.cli() && !!whisperPaths.parakeetCli() && !!whisperPaths.vadCli() && hasFile(whisperPaths.vad(), VAD.size)
 
-/** Which speech model transcribes: Parakeet when installed, else an existing Whisper model. */
-export function speechEngine(): 'parakeet' | 'whisper' | null {
+const modelFile = (m: SpeechModelFile) => join(paths.bin(), m.name)
+const modelInstalled = (m: SpeechModelFile) => hasFile(modelFile(m), m.size)
+
+export const installedModels = (): SpeechModelId[] => (Object.keys(SPEECH) as SpeechModelId[]).filter((id) => modelInstalled(SPEECH[id]))
+
+export interface ActiveModel {
+  id: SpeechModelId | null // null for the old Whisper small
+  engine: 'parakeet' | 'whisper'
+  file: string
+  dtw?: string
+}
+
+/**
+ * The model that transcribes: the one chosen in Settings when it's installed,
+ * else whatever is installed, preferring Parakeet; the old Whisper small last.
+ */
+export function speechModel(): ActiveModel | null {
   if (!toolsReady()) return null
-  if (hasFile(whisperPaths.parakeet(), PARAKEET.size)) return 'parakeet'
-  if (hasFile(whisperPaths.model(), WHISPER_MODEL.size)) return 'whisper'
+  const chosen = getSettings().speechModel
+  const order: SpeechModelId[] = [chosen, 'parakeet', 'parakeet-hq', 'whisper-medium']
+  for (const id of order) {
+    const m = SPEECH[id]
+    if (modelInstalled(m)) return { id, engine: m.engine, file: modelFile(m), dtw: m.dtw }
+  }
+  if (modelInstalled(WHISPER_SMALL)) return { id: null, engine: 'whisper', file: modelFile(WHISPER_SMALL), dtw: WHISPER_SMALL.dtw }
   return null
 }
 
-export const speechReady = (): boolean => speechEngine() !== null
+export const speechEngine = (): 'parakeet' | 'whisper' | null => speechModel()?.engine ?? null
+
+export const speechReady = (): boolean => speechModel() !== null
 
 /** The speaker models are optional extras; without them everyone on the call is "Others". */
 export function speakersReady(): boolean {
@@ -107,7 +167,8 @@ function missing(): Array<{ url: string; size: number; sha256: string; dest: str
   const out: Array<{ url: string; size: number; sha256: string; dest: string }> = []
   if (!whisperPaths.cli() || !whisperPaths.parakeetCli() || !whisperPaths.vadCli()) out.push({ ...WHISPER_ZIP, dest: join(dir, 'whisper-bin-x64.zip') })
   if (!hasFile(whisperPaths.vad(), VAD.size)) out.push({ ...VAD, dest: whisperPaths.vad() })
-  if (!hasFile(whisperPaths.parakeet(), PARAKEET.size)) out.push({ ...PARAKEET, dest: whisperPaths.parakeet() })
+  const chosen = SPEECH[getSettings().speechModel]
+  if (!modelInstalled(chosen)) out.push({ ...chosen, dest: modelFile(chosen) })
   if (!hasFile(speakerPaths.segmentation(), SEGMENTATION.fileSize)) out.push({ ...SEGMENTATION, dest: join(dir, SEGMENTATION.archive) })
   if (!hasFile(speakerPaths.embedding(), EMBEDDING.size)) out.push({ ...EMBEDDING, dest: speakerPaths.embedding() })
   return out
@@ -311,6 +372,8 @@ export async function setupStatus(): Promise<SetupStatus> {
       ...download,
       ready: !download.downloading && speechReady(),
       engine: speechEngine(),
+      model: modelInstalled(SPEECH[getSettings().speechModel]) ? getSettings().speechModel : null,
+      installed: installedModels(),
       speakers: speakersReady(),
       downloadMb: downloadMb()
     },

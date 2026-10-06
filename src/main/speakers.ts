@@ -64,8 +64,15 @@ export function assignLines(transcript: TranscriptSegment[], clusters: SpeakerCl
   const idOf = new Map<number, SpeakerId>()
   const ids: SpeakerId[] = []
   let last: number | null = null
+  let prev: TranscriptSegment | null = null
   const out = transcript.map((seg) => {
     if (seg.speaker !== 'others') return seg
+    // The rest of an unfinished sentence ("…you know" / "in a moment.") stays
+    // with whoever started it. These pieces are often too short to tell a
+    // voice by, so overlap alone can hand them to someone else.
+    const continues =
+      prev !== null && last !== null && seg.start - prev.end < 3 && /^[a-z]/.test(seg.text.trim()) && !/[.?!…]["')\]]*$/.test(prev.text.trim())
+    prev = seg
     let k = -1
     let best = 0
     clusters.forEach((c, i) => {
@@ -89,6 +96,7 @@ export function assignLines(transcript: TranscriptSegment[], clusters: SpeakerCl
       })
       if (k < 0) k = last ?? clusters.reduce((m, c, i, arr) => (c.seconds > arr[m].seconds ? i : m), 0)
     }
+    if (continues) k = last!
     last = k
     let id = idOf.get(k)
     if (!id) {
@@ -111,7 +119,7 @@ export interface SeparateResult {
  * Splits "Others" into s1, s2… using the system-audio track, saves each voice's
  * embedding beside the transcript, and names voices heard in past meetings.
  */
-export async function separateSpeakers(meetingId: string, sysWav: string, transcript: TranscriptSegment[]): Promise<SeparateResult> {
+export async function separateSpeakers(meetingId: string, sysWav: string, transcript: TranscriptSegment[], attendees: string[] = []): Promise<SeparateResult> {
   const models = speakerPaths
   const spans = transcript.filter((s) => s.speaker === 'others').map((s) => ({ start: s.start, end: s.end }))
   if (!spans.length) return { transcript, names: {} }
@@ -120,7 +128,9 @@ export async function separateSpeakers(meetingId: string, sysWav: string, transc
     spans,
     segmentationModel: models.segmentation(),
     embeddingModel: models.embedding(),
-    threads: BATCH_THREADS
+    threads: BATCH_THREADS,
+    // The invite list includes the note taker, who is on the mic track.
+    expected: attendees.length >= 2 ? Math.min(attendees.length - 1, 8) : undefined
   })
   const assigned = assignLines(transcript, clusters)
 

@@ -7,6 +7,7 @@ import { EditorContent, useEditor, type Editor as TiptapEditor } from '@tiptap/r
 import StarterKit from '@tiptap/starter-kit'
 import { useEffect, useRef } from 'react'
 import { fromEditorMarkdown, toEditorMarkdown } from '@/lib/utils'
+import { wordAtPoint, type WordAt } from './CorrectWord'
 
 interface Props {
   meetingId: string
@@ -14,6 +15,8 @@ interface Props {
   /** Bumped when the note was replaced on disk (e.g. summary added) and must reload. */
   version: number
   editable: boolean
+  /** Right-click on a word: offer to correct its spelling in the note and transcript. */
+  onCorrect?: (at: WordAt) => void
 }
 
 const SAVE_DELAY = 400
@@ -26,9 +29,11 @@ async function insertImageFile(editor: TiptapEditor, meetingId: string, file: Fi
   else editor.chain().focus().insertContentAt(pos, node).run()
 }
 
-export function Editor({ meetingId, markdown, version, editable }: Props) {
+export function Editor({ meetingId, markdown, version, editable, onCorrect }: Props) {
   const saveTimer = useRef<number | undefined>(undefined)
   const editorRef = useRef<TiptapEditor | null>(null)
+  const correctRef = useRef(onCorrect)
+  correctRef.current = onCorrect
 
   const flush = () => {
     window.clearTimeout(saveTimer.current)
@@ -51,6 +56,15 @@ export function Editor({ meetingId, markdown, version, editable }: Props) {
     editable,
     editorProps: {
       attributes: { class: 'focus:outline-none', 'aria-label': 'Notes' },
+      handleDOMEvents: {
+        contextmenu: (view, event) => {
+          const word = correctRef.current && wordAtPoint(event.clientX, event.clientY, view.dom)
+          if (!word) return false
+          event.preventDefault()
+          correctRef.current?.({ word, x: event.clientX, y: event.clientY })
+          return true
+        }
+      },
       handlePaste: (_view, event) => {
         const file = Array.from(event.clipboardData?.files ?? []).find((f) => f.type.startsWith('image/'))
         if (!file || !editorRef.current) return false

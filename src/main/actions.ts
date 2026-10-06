@@ -129,6 +129,35 @@ export function setActionDone(meetingId: string, index: number, raw: string, don
   })
 }
 
+/** Drops one task line from the note, and from the Obsidian copy if there is one. */
+function removeLine(md: string, index: number, raw: string): string | null {
+  const lines = md.split('\n')
+  const tasks = taskLines(md)
+  const hit = tasks[index]?.raw === raw ? tasks[index] : tasks.find((t) => t.raw === raw)
+  if (!hit) return null
+  lines.splice(hit.line, 1)
+  return lines.join('\n')
+}
+
+export function removeAction(meetingId: string, index: number, raw: string): void {
+  const next = removeLine(store.readNote(meetingId), index, raw)
+  if (next === null) return
+  store.writeNote(meetingId, next)
+
+  const m = store.getMeeting(meetingId)
+  const path = m?.sync.path
+  if (!m || !path || !existsSync(path)) return
+  const before = statSync(path).mtimeMs
+  const patched = removeLine(readFileSync(path, 'utf8'), index, raw)
+  if (patched === null) return
+  writeFileSync(path, patched)
+  const after = statSync(path).mtimeMs
+  const untouched = !m.sync.mtimeMs || before <= m.sync.mtimeMs + 1000
+  store.updateMeeting(meetingId, {
+    sync: untouched ? { ...m.sync, mtimeMs: after } : { ...m.sync, mergedMtimeMs: after }
+  })
+}
+
 // ---------- Daily reminder ----------
 
 function today(d = new Date()): string {

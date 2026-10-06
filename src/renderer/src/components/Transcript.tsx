@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { countMatches, findPattern } from '@shared/text'
 import { speakerName, type Meeting, type SpeakerId, type TranscriptSegment } from '@shared/types'
 import { clock, cn } from '@/lib/utils'
+import { CorrectWord, wordAtPoint, type WordAt } from './CorrectWord'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
@@ -199,7 +200,18 @@ function SpeakerPicker({
 
 // ---------- Lines ----------
 
-function LineText({ text, re, onSave }: { text: string; re: RegExp | null; onSave?: (text: string) => void }) {
+function LineText({
+  text,
+  re,
+  onSave,
+  onCorrect
+}: {
+  text: string
+  re: RegExp | null
+  onSave?: (text: string) => void
+  /** Right-click on a word: offer to correct its spelling everywhere. */
+  onCorrect: (at: WordAt) => void
+}) {
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState(text)
   useEffect(() => setValue(text), [text])
@@ -209,7 +221,13 @@ function LineText({ text, re, onSave }: { text: string; re: RegExp | null; onSav
       <span
         className={cn('text-[15px]', onSave && 'cursor-text rounded hover:bg-foreground/[0.04]')}
         onClick={() => onSave && setEditing(true)}
-        title={onSave ? 'Select to edit' : undefined}
+        onContextMenu={(e) => {
+          const word = wordAtPoint(e.clientX, e.clientY, e.currentTarget)
+          if (!word) return
+          e.preventDefault()
+          onCorrect({ word, x: e.clientX, y: e.clientY })
+        }}
+        title={onSave ? 'Select to edit. Right-click a word to correct it everywhere.' : undefined}
       >
         {highlight(text, re)}
       </span>
@@ -241,6 +259,65 @@ function LineText({ text, re, onSave }: { text: string; re: RegExp | null; onSav
       aria-label="Edit line"
       className="-mx-1 -my-0.5 block w-full resize-none rounded-md bg-surface px-1 py-0.5 text-[15px] leading-relaxed outline-2 outline-primary [field-sizing:content]"
     />
+  )
+}
+
+// ---------- Corrections ----------
+
+/**
+ * A single changed word or short phrase between two versions of a line, so
+ * the fix can be offered for future meetings. Null when more changed.
+ */
+export function wordChange(before: string, after: string): { from: string; to: string } | null {
+  const a = before.split(/s+/).filter(Boolean)
+  const b = after.split(/s+/).filter(Boolean)
+  let i = 0
+  while (i < a.length && i < b.length && a[i] === b[i]) i++
+  let j = 0
+  while (j < a.length - i && j < b.length - i && a[a.length - 1 - j] === b[b.length - 1 - j]) j++
+  const from = a.slice(i, a.length - j)
+  const to = b.slice(i, b.length - j)
+  if (!from.length || !to.length || from.length > 3 || to.length > 3) return null
+  const strip = (w: string[]) => w.join(' ').replace(/^[^p{L}p{N}]+|[^p{L}p{N}]+$/gu, '')
+  const f = strip(from)
+  const t = strip(to)
+  if (!f || !t || f.toLowerCase() === t.toLowerCase()) return null
+  return { from: f, to: t }
+}
+
+/** After an edit changed one word: offer to remember the fix. */
+function RememberFix({ change, onClose }: { change: { from: string; to: string }; onClose: () => void }) {
+  const [done, setDone] = useState(false)
+  useEffect(() => {
+    const t = window.setTimeout(onClose, done ? 2500 : 15_000)
+    return () => window.clearTimeout(t)
+  }, [done, onClose])
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md bg-foreground/5 px-3 py-1.5 text-[13px]" role="status">
+      {done ? (
+        <span className="text-muted">Added to Names and terms. Future transcripts will say “{change.to}”.</span>
+      ) : (
+        <>
+          <span className="text-muted">
+            Fix “{change.from}” to “{change.to}” in future meetings too?
+          </span>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 text-primary"
+            onClick={() => {
+              setDone(true)
+              void window.kasha.rememberTerm(change.from, change.to)
+            }}
+          >
+            Yes, remember it
+          </Button>
+          <Button size="sm" variant="ghost" className="h-7" onClick={onClose}>
+            No
+          </Button>
+        </>
+      )}
+    </div>
   )
 }
 
@@ -374,7 +451,16 @@ export function Transcript({ meeting, segments, note, live, liveEnabled, onSave,
   const [finding, setFinding] = useState(false)
   const [find, setFind] = useState('')
   const [matchCase, setMatchCase] = useState(false)
+  const [correct, setCorrect] = useState<WordAt | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [change, setChange] = useState<{ from: string; to: string } | null>(null)
   const end = useStickToBottom(segments.length, live)
+
+  useEffect(() => {
+    if (!notice) return
+    const t = window.setTimeout(() => setNotice(null), 4000)
+    return () => window.clearTimeout(t)
+  }, [notice])
 
   const re = useMemo(() => (finding ? findPattern(find, { matchCase }) : null), [finding, find, matchCase])
   const inTranscript = useMemo(() => segments.reduce((n, s) => n + countMatches(s.text, re), 0), [segments, re])
@@ -412,8 +498,10 @@ export function Transcript({ meeting, segments, note, live, liveEnabled, onSave,
     return <p className="text-muted">{msg}</p>
   }
 
-  const edit = (i: number, patch: Partial<TranscriptSegment>) =>
+  const edit = (i: number, patch: Partial<TranscriptSegment>) => {
+    if (patch.text !== undefined) setChange(wordChange(segments[i].text, patch.text))
     onSave?.(segments.map((s, j) => (j === i ? { ...s, ...patch } : s)))
+  }
 
   return (
     <div className="flex max-w-[80ch] flex-col gap-5">
@@ -429,6 +517,26 @@ export function Transcript({ meeting, segments, note, live, liveEnabled, onSave,
           </Button>
         )}
       </div>
+
+      {change && <RememberFix change={change} onClose={() => setChange(null)} />}
+      {notice && (
+        <p className="-mt-2 text-[13px] text-muted" role="status">
+          {notice}
+        </p>
+      )}
+      {correct && (
+        <CorrectWord
+          meetingId={meeting.id}
+          at={correct}
+          canReplace={!!onSave}
+          onClose={() => setCorrect(null)}
+          onDone={(text) => {
+            setCorrect(null)
+            setNotice(text)
+            onReplaced()
+          }}
+        />
+      )}
 
       {live && (
         <p className="-mt-2 inline-flex items-center gap-2 text-[13px] text-muted">
@@ -468,7 +576,7 @@ export function Transcript({ meeting, segments, note, live, liveEnabled, onSave,
                 show={turn}
                 onPick={onSave && ((speaker) => edit(i, { speaker }))}
               />
-              <LineText text={s.text} re={re} onSave={onSave && ((text) => edit(i, { text }))} />
+              <LineText text={s.text} re={re} onSave={onSave && ((text) => edit(i, { text }))} onCorrect={setCorrect} />
             </li>
           )
         })}

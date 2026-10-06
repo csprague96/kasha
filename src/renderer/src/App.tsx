@@ -82,6 +82,7 @@ export function App() {
   }
 
   const current = view.kind === 'note' ? meetings.find((m) => m.id === view.id) : undefined
+  const allTags = Array.from(new Set(meetings.flatMap((m) => m.tags))).sort()
   const openMine = actions.reduce((n, g) => n + g.items.filter((i) => i.mine && !i.done).length, 0)
 
   const toggleAction = (item: ActionItem, done: boolean) => {
@@ -92,6 +93,12 @@ export function App() {
       )
     )
     void window.kasha.setActionDone(item.meetingId, item.index, item.raw, done)
+  }
+  const removeAction = (item: ActionItem) => {
+    setActions((gs) =>
+      gs.map((g) => (g.meeting.id !== item.meetingId ? g : { ...g, items: g.items.filter((i) => i.index !== item.index) })).filter((g) => g.items.length)
+    )
+    void window.kasha.removeAction(item.meetingId, item.index, item.raw)
   }
 
   return (
@@ -107,7 +114,7 @@ export function App() {
       <main className="min-w-0 overflow-y-auto">
         {view.kind === 'settings' && <Settings settings={settings} onChange={updateSettings} />}
         {view.kind === 'actions' && (
-          <ActionsView groups={actions} onToggle={toggleAction} onOpenMeeting={(id) => setView({ kind: 'note', id })} />
+          <ActionsView groups={actions} onToggle={toggleAction} onRemove={removeAction} onOpenMeeting={(id) => setView({ kind: 'note', id })} />
         )}
         {current && (
           <NoteView
@@ -116,6 +123,7 @@ export function App() {
             recording={recording}
             progress={progress[current.id]}
             settings={settings}
+            allTags={allTags}
           />
         )}
         {view.kind !== 'settings' && view.kind !== 'actions' && !current && (

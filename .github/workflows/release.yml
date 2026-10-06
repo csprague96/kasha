@@ -1,0 +1,50 @@
+name: Release
+
+# Every push to main builds the Windows installer. When package.json's version
+# has no release yet, the installer and its update metadata (latest.yml) are
+# published as GitHub release v<version>, and installed copies pick it up
+# through Kasha's updater. Bump the version in package.json to ship an update.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Is this version released already?
+        id: version
+        shell: bash
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          echo "tag=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "$version" >/dev/null 2>&1; then
+            echo "$version is already released; building only."
+            echo "publish=never" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=always" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Build and publish the installer
+        run: npm run build && npx electron-builder --win --publish ${{ steps.version.outputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kasha-Setup
+          path: |
+            dist/*.exe
+            dist/latest.yml
+          if-no-files-found: error

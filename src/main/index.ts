@@ -24,6 +24,7 @@ import {
   GENERIC_TITLE,
   isSpeakerId,
   normName,
+  normTag,
   type CalendarMatch,
   type DetectedMeeting,
   type LiveState,
@@ -37,24 +38,26 @@ import {
   type ToastState,
   type TranscriptSegment
 } from '@shared/types'
-import { listActions, ReminderScheduler, setActionDone } from './actions'
+import { listActions, ReminderScheduler, removeAction, setActionDone } from './actions'
+import { audioInfo, deleteAudio, exportAudio, startAudioSweeper } from './audio'
 import { lookupMeeting } from './calendar'
 import { log } from './log'
 import { MeetingDetector } from './detector'
 import { getLive, startLive, takeLive, type LiveTranscriber } from './live'
-import { syncToObsidian } from './obsidian'
+import { exportFileName, exportOptions, syncToObsidian } from './obsidian'
 import { cleanText, enqueue, type PipelineEvents } from './pipeline'
 import { Recording, type Track } from './recorder'
 import { takeScreenshot } from './screenshot'
 import { copyToClipboard, emailDraft, saveMarkdown, savePdf } from './share'
 import { redact } from './redact'
-import { downloadSpeech, setupStatus, speechReady } from './setup'
+import { downloadSpeech, setupStatus, speakersReady, speechReady } from './setup'
 import { syncVoices } from './speakers'
 import { whisperPrompt } from './speech'
 import * as store from './store'
 import { splitNote } from './summarizer'
+import { Updater } from './updater'
 import * as voices from './voices'
-import { createBarWindow, createMainWindow, createToastWindow } from './windows'
+import { appIcon, createBarWindow, createMainWindow, createToastWindow } from './windows'
 
 // Dev and testing: keep data in a separate folder so real notes aren't touched.
 if (process.env.KASHA_DATA_DIR) app.setPath('userData', process.env.KASHA_DATA_DIR)
@@ -93,12 +96,21 @@ let recording: ActiveRecording | null = null
 
 const detector = new MeetingDetector(() => store.getSettings().detect)
 
+/** A recording or processing in progress: an update must wait for it. */
+const busy = () =>
+  !!recording || store.listMeetings().some((m) => m.status === 'transcribing' || m.status === 'separating' || m.status === 'summarizing')
+
+const updater = new Updater((status) => {
+  broadcast('update-status', status)
+  refreshTray()
+}, busy)
+
 const reminders = new ReminderScheduler(
   () => store.getSettings(),
   (lastShown) => store.setSettings({ reminders: { ...store.getSettings().reminders, lastShown } }),
   (text) => {
     if (!Notification.isSupported()) return
-    const n = new Notification({ title: 'Open actions', body: text, silent: true })
+    const n = new Notification({ title: 'Open actions', body: text, silent: true, icon: appIcon() })
     n.on('click', () => showMain({ actions: true }))
     n.show()
   }
@@ -200,10 +212,16 @@ function seenBefore(title: string): boolean {
 function worthOffering(title: string | null): title is string {
   if (!title) return false
   const r = ruleSettings()
-  return !listHas(r.meetings, title) && !listHas(r.declined, title)
+  return !listHas(r.meetings, title) && !listHas(r.declined, title) && !listHas(r.never, title)
 }
 
-function addToRule(key: 'meetings' | 'declined', title: string): void {
+/** The call is one the user never records: no prompt, no rule, in every mode. */
+function neverRecords(title: string, match?: CalendarMatch | null): boolean {
+  const r = ruleSettings()
+  return [title, match?.subject ?? ''].some((t) => t && !GENERIC_TITLE.test(t) && listHas(r.never, t))
+}
+
+function addToRule(key: 'meetings' | 'declined' | 'never', title: string): void {
   const r = ruleSettings()
   if (listHas(r[key], title)) return
   broadcast('settings-changed', store.setSettings({ recording: { ...r, [key]: [...r[key], title] } }))
@@ -245,6 +263,9 @@ function refreshTray(): void {
       { label: 'Actions', click: () => showMain({ actions: true }) },
       { label: 'Settings', click: () => showMain({ settings: true }) },
       { type: 'separator' },
+      ...(updater.current().state === 'ready'
+        ? [{ label: `Restart to update to ${updater.current().version}`, click: () => void updater.restart() }]
+        : []),
       { label: 'Quit Kasha', click: () => app.quit() }
     ])
   )
@@ -391,7 +412,8 @@ function closeToast(): void {
 function showToast(state: ToastState): void {
   closeToast()
   toast = state
-  toastWin = createToastWindow()
+  // The call prompt has a third, smaller choice: never record this meeting.
+  toastWin = createToastWindow(state.kind === 'detected' && !GENERIC_TITLE.test(state.meeting.title) ? 184 : 156)
   toastWin.on('closed', () => (toastWin = null))
   log('prompt-shown', { kind: state.kind })
   if (state.kind === 'detected') return
@@ -409,6 +431,7 @@ async function onDetected(m: DetectedMeeting): Promise<void> {
   const r = settings.recording
   log('call-detected', { app: m.app, mode: r.mode, recording: !!recording, dismissed: dismissed.has(m.app), setup: settings.setupComplete })
   if (recording || dismissed.has(m.app) || !settings.setupComplete) return
+  if (neverRecords(m.title)) return log('call-skipped', { app: m.app })
   // Started now so the invite list is ready by the time it's needed.
   const calendar = r.lookupAttendees ? lookupMeeting(m.title) : Promise.resolve(null)
   lookups.set(m.app, calendar)
@@ -417,6 +440,12 @@ async function onDetected(m: DetectedMeeting): Promise<void> {
   // Someone on the always-record list may be in the invite.
   const match = await calendar
   if (recording || dismissed.has(m.app) || !detector.isLive(m.app)) return
+  // A generic window title can hide a meeting on the never list; the calendar subject gives it away.
+  if (neverRecords(m.title, match)) {
+    log('call-skipped', { app: m.app, prompt: toast?.kind === 'detected' })
+    if (toast?.kind === 'detected' && toast.meeting.app === m.app) closeToast()
+    return
+  }
   if (alwaysRecords(m.title, match)) await startRecording(undefined, m, { auto: true })
 }
 
@@ -445,7 +474,24 @@ function registerIpc(): void {
     if (!meeting) return null
     const live = getLive(id)
     const transcript = live ? live.current().map((s) => ({ ...s, text: cleanText(s.text) })) : store.readTranscript(id)
-    return { meeting, note: store.readNote(id), transcript }
+    return { meeting, note: store.readNote(id), transcript, audio: meeting.status === 'recording' ? null : audioInfo(id) }
+  })
+  handle('meetings:saveAudio', async (id: string) => {
+    const m = store.getMeeting(id)
+    if (!m || !audioInfo(id)) return false
+    const opts: Electron.OpenDialogOptions = { title: 'Save the recording to', properties: ['openDirectory', 'createDirectory'] }
+    const r = mainWin ? await dialog.showOpenDialog(mainWin, opts) : await dialog.showOpenDialog(opts)
+    if (r.canceled || !r.filePaths[0]) return false
+    const files = exportAudio(id, r.filePaths[0], exportFileName(m, '{date} {title}').replace(/\.md$/, ''))
+    log('audio-saved', { tracks: files.length })
+    if (files[0]) shell.showItemInFolder(files[0])
+    return files.length > 0
+  })
+  handle('meetings:deleteAudio', (id: string) => {
+    const m = store.getMeeting(id)
+    if (!m || m.status === 'recording' || m.status === 'transcribing' || m.status === 'separating') return
+    deleteAudio(id)
+    broadcast('meetings-changed')
   })
   handle('meetings:create', () => {
     const m = store.createMeeting({ title: 'New note', app: 'manual' })
@@ -456,7 +502,7 @@ function registerIpc(): void {
     const before = store.getMeeting(id)
     const clean: Partial<Meeting> = {}
     if (typeof patch.title === 'string') clean.title = patch.title.trim().slice(0, 200) || 'Untitled'
-    if (Array.isArray(patch.tags)) clean.tags = patch.tags.map(String).slice(0, 20)
+    if (Array.isArray(patch.tags)) clean.tags = Array.from(new Set(patch.tags.map((t) => normTag(String(t))).filter(Boolean))).slice(0, 20)
     if (patch.speakers && typeof patch.speakers === 'object') {
       const names: NonNullable<Meeting['speakers']> = {}
       for (const [k, v] of Object.entries(patch.speakers)) {
@@ -471,6 +517,20 @@ function registerIpc(): void {
       const guesses = { ...before?.speakerGuesses }
       for (const k of Object.keys(guesses) as SpeakerId[]) if (names[k] !== before?.speakers?.[k]) delete guesses[k]
       clean.speakerGuesses = guesses
+    }
+    if (Array.isArray(patch.attendees)) {
+      const names = patch.attendees.filter((a): a is string => typeof a === 'string').map((a) => a.trim().slice(0, 80)).filter(Boolean)
+      clean.attendees = Array.from(new Set(names)).slice(0, 100)
+    }
+    if (patch.attendance && typeof patch.attendance === 'object') {
+      const marks = { ...before?.attendance }
+      for (const [k, v] of Object.entries(patch.attendance)) {
+        const key = normName(String(k)).slice(0, 80)
+        if (!key) continue
+        if (v === 'present' || v === 'absent') marks[key] = v
+        else delete marks[key]
+      }
+      clean.attendance = marks
     }
     const confirm = patch.confirmSpeaker
     if (isSpeakerId(confirm) && before?.speakerGuesses?.[confirm] && before.speakers?.[confirm]) {
@@ -536,6 +596,7 @@ function registerIpc(): void {
     if (inNotes) broadcast('actions-changed')
     return { transcript: inTranscript, notes: inNotes }
   })
+  handle('vocab:remember', (heard: string, term: string) => rememberTerm(String(heard).slice(0, 80), String(term).slice(0, 80)))
   handle('meetings:resummarize', (id: string) => {
     const m = store.getMeeting(id)
     if (!m || (m.status !== 'ready' && m.status !== 'failed') || !store.readTranscript(id).length) return
@@ -550,7 +611,7 @@ function registerIpc(): void {
   handle('meetings:sync', (id: string) => {
     const m = store.getMeeting(id)
     if (!m) return
-    const sync = syncToObsidian(m, store.readNote(id), store.readTranscript(id), store.getSettings().obsidian, true)
+    const sync = syncToObsidian(m, store.readNote(id), store.readTranscript(id), exportOptions(store.getSettings()), true)
     store.updateMeeting(id, { sync })
     broadcast('meetings-changed')
   })
@@ -566,6 +627,10 @@ function registerIpc(): void {
   handle('actions:list', () => listActions())
   handle('actions:setDone', (id: string, index: number, raw: string, done: boolean) => {
     setActionDone(id, Number(index), String(raw), !!done)
+    broadcast('actions-changed')
+  })
+  handle('actions:remove', (id: string, index: number, raw: string) => {
+    removeAction(id, Number(index), String(raw))
     broadcast('actions-changed')
   })
 
@@ -595,6 +660,32 @@ function registerIpc(): void {
     downloadSpeech(async () => broadcast('setup-changed', await setupStatus()))
   )
 
+  handle('tags:list', () => {
+    const counts = new Map<string, number>()
+    for (const m of store.listMeetings()) for (const t of m.tags) counts.set(t, (counts.get(t) ?? 0) + 1)
+    return Array.from(counts, ([tag, count]) => ({ tag, count })).sort((a, b) => a.tag.localeCompare(b.tag))
+  })
+  // Renaming or removing a tag touches every note that has it. Synced notes
+  // are written to Obsidian again, unless they were edited there.
+  const retag = (fn: (tags: string[]) => string[]) => {
+    const settings = store.getSettings()
+    for (const m of store.listMeetings()) {
+      const tags = Array.from(new Set(fn(m.tags)))
+      if (tags.length === m.tags.length && tags.every((t, i) => t === m.tags[i])) continue
+      let next = store.updateMeeting(m.id, { tags })
+      if (next.sync.state === 'synced' && settings.obsidian.vault) {
+        next = store.updateMeeting(m.id, { sync: syncToObsidian(next, store.readNote(m.id), store.readTranscript(m.id), exportOptions(settings)) })
+      }
+    }
+    broadcast('meetings-changed')
+  }
+  handle('tags:rename', (from: string, to: string) => {
+    const target = normTag(String(to))
+    if (!target || target === from) return
+    retag((tags) => tags.map((t) => (t === from ? target : t)))
+  })
+  handle('tags:remove', (tag: string) => retag((tags) => tags.filter((t) => t !== tag)))
+
   handle('voices:list', () => voices.list())
   handle('voices:remove', (name: string) => voices.remove(String(name)))
   handle('setup:pickFolder', async () => {
@@ -602,6 +693,11 @@ function registerIpc(): void {
     const r = mainWin ? await dialog.showOpenDialog(mainWin, opts) : await dialog.showOpenDialog(opts)
     return r.canceled ? null : r.filePaths[0]
   })
+
+  handle('app:info', () => ({ version: app.getVersion(), installed: app.isPackaged }))
+  handle('update:status', () => updater.current())
+  handle('update:check', () => updater.check())
+  handle('update:install', () => updater.restart())
 
   ipcMain.on('win:openMeeting', (e, id: string) => isOwnWindow(e.sender) && showMain({ meetingId: id }))
 
@@ -626,6 +722,15 @@ function registerIpc(): void {
     closeToast()
     if (t?.kind === 'detected') dismissed.add(t.meeting.app)
     if (t?.kind === 'recurring') addToRule('declined', t.title)
+  })
+  ipcMain.on('toast:never', (e) => {
+    if (!isOwnWindow(e.sender)) return
+    const t = toast
+    log('prompt-never', { kind: t?.kind })
+    closeToast()
+    if (t?.kind !== 'detected') return
+    dismissed.add(t.meeting.app)
+    if (!GENERIC_TITLE.test(t.meeting.title)) addToRule('never', t.meeting.title)
   })
 
   handle('calendar:check', () => lookupMeeting('Teams meeting'))
@@ -692,6 +797,7 @@ app.on('window-all-closed', () => undefined)
 
 app.on('before-quit', () => {
   detector.stop()
+  updater.stop()
   if (recording) {
     // Close files cleanly so the audio can still be processed next time.
     const { meetingId, rec } = recording
@@ -736,6 +842,13 @@ app.whenReady().then(() => {
 
   registerIpc()
   applyLoginItem()
+  updater.start()
+  startAudioSweeper(() => broadcast('meetings-changed'))
+  // An update changed the voice model: fetch the new one (small) so speakers are still told apart.
+  if (store.getSettings().setupComplete && speechReady() && !speakersReady()) {
+    log('speaker-models-missing', { downloading: true })
+    void downloadSpeech(async () => broadcast('setup-changed', await setupStatus()))
+  }
   tray = new Tray(trayIcon())
   tray.on('click', () => showMain())
   refreshTray()

@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { APP_LABELS, type ToastState } from '@shared/types'
+import { APP_LABELS, GENERIC_TITLE, type ToastState } from '@shared/types'
 import { Button } from './components/ui/button'
 import './styles.css'
 
@@ -51,6 +51,15 @@ function Toast() {
         </Button>
         <Button onClick={() => window.toast.dismiss()}>Not now</Button>
       </div>
+      {!GENERIC_TITLE.test(m.title) && (
+        <button
+          onClick={() => window.toast.never()}
+          className="-mt-1.5 self-start text-xs text-muted hover:text-foreground hover:underline"
+          title="Kasha won’t record or ask about a meeting with this title again. Change it in Settings."
+        >
+          Never record this meeting
+        </button>
+      )}
     </div>
   )
 }

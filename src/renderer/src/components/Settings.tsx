@@ -3,9 +3,13 @@ import { useEffect, useState, type ReactNode } from 'react'
 import {
   APP_LABELS,
   normName,
+  normTag,
+  SPEECH_MODELS,
   type CalendarMatch,
+  type TagCount,
   type SetupStatus,
   type Settings as SettingsT,
+  type SpeechModelId,
   type VocabularyEntry,
   type VoiceProfile
 } from '@shared/types'
@@ -13,6 +17,7 @@ import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Switch } from './ui/switch'
+import { UpdateControls } from './Updates'
 
 interface Props {
   settings: SettingsT
@@ -128,10 +133,25 @@ const splitList = (v: string) =>
     .map((x) => x.trim())
     .filter(Boolean)
 
-/** Names and product terms the speech model should spell right. */
+const FILTER_FROM = 6 // entries before a filter box appears
+const LETTERS_FROM = 12 // entries before they're grouped by first letter, like a dictionary
+
+/** Names and product terms the speech model should spell right, laid out like a dictionary once there are many. */
 function Vocabulary({ entries, onChange }: { entries: VocabularyEntry[]; onChange: (v: VocabularyEntry[]) => void }) {
   const [term, setTerm] = useState('')
   const [heard, setHeard] = useState('')
+  const [filter, setFilter] = useState('')
+  // Alphabetical, keeping each entry's index in the saved list so edits land on the right one.
+  const sorted = entries
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => a.e.term.localeCompare(b.e.term, undefined, { sensitivity: 'base' }))
+  const q = filter.trim().toLowerCase()
+  const shown = q ? sorted.filter(({ e }) => e.term.toLowerCase().includes(q) || e.heardAs.some((h) => h.toLowerCase().includes(q))) : sorted
+  const letterOf = (t: string) => {
+    const c = t.trim().charAt(0).toUpperCase()
+    return /[A-Z]/.test(c) ? c : /\p{L}/u.test(c) ? c : '#'
+  }
+  const grouped = entries.length >= LETTERS_FROM
   const add = () => {
     const t = term.trim()
     if (!t) return
@@ -147,12 +167,8 @@ function Vocabulary({ entries, onChange }: { entries: VocabularyEntry[]; onChang
   }
   const update = (i: number, patch: Partial<VocabularyEntry>) => onChange(entries.map((e, j) => (j === i ? { ...e, ...patch } : e)))
 
-  return (
-    <div className="flex flex-col gap-3">
-      {entries.length > 0 && (
-        <div className="flex flex-col divide-y divide-border rounded-md border border-border bg-surface">
-          {entries.map((e, i) => (
-            <div key={`${e.term}-${i}`} className="grid grid-cols-[1fr_1fr_auto] items-center gap-2 px-2 py-1.5">
+  const row = ({ e, i }: { e: VocabularyEntry; i: number }) => (
+    <div key={`${e.term}-${i}`} className="grid grid-cols-[1fr_1fr_auto] items-center gap-2 px-2 py-1.5">
               <LazyInput
                 aria-label="Name or term"
                 className="h-8 border-transparent bg-transparent px-1.5 font-medium hover:border-border"
@@ -169,10 +185,34 @@ function Vocabulary({ entries, onChange }: { entries: VocabularyEntry[]; onChang
               <Button variant="ghost" size="icon" aria-label={`Remove ${e.term}`} onClick={() => onChange(entries.filter((_, j) => j !== i))}>
                 <X className="text-muted" />
               </Button>
+    </div>
+  )
+
+  return (
+    <div className="flex flex-col gap-3">
+      {entries.length >= FILTER_FROM && (
+        <div className="flex items-center gap-3">
+          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Find a name or term" aria-label="Find a name or term" className="h-8 max-w-xs text-[13px]" />
+          <span className="tabular text-xs text-muted">
+            {q ? `${shown.length} of ` : ''}
+            {entries.length} {entries.length === 1 ? 'entry' : 'entries'}
+          </span>
+        </div>
+      )}
+      {shown.length > 0 && !grouped && <div className="flex flex-col divide-y divide-border rounded-md border border-border bg-surface">{shown.map(row)}</div>}
+      {shown.length > 0 && grouped && (
+        <div className="flex flex-col gap-3">
+          {Array.from(new Set(shown.map(({ e }) => letterOf(e.term)))).map((letter) => (
+            <div key={letter} className="flex flex-col gap-1">
+              <div className="px-1 font-mono text-xs font-medium text-muted">{letter}</div>
+              <div className="flex flex-col divide-y divide-border rounded-md border border-border bg-surface">
+                {shown.filter(({ e }) => letterOf(e.term) === letter).map(row)}
+              </div>
             </div>
           ))}
         </div>
       )}
+      {q && shown.length === 0 && <p className="text-[13px] text-muted">Nothing matches “{filter.trim()}”.</p>}
       <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
         <Input value={term} onChange={(e) => setTerm(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} placeholder="Name or term, e.g. RCVR" aria-label="New name or term" />
         <Input value={heard} onChange={(e) => setHeard(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} placeholder="Often heard as, e.g. Recover" aria-label="Often heard as" />
@@ -220,10 +260,49 @@ function NameList({ items, onChange, placeholder, label }: { items: string[]; on
 }
 
 const MODES: Array<{ value: SettingsT['recording']['mode']; label: string; hint: string }> = [
-  { value: 'ask', label: 'Ask each time', hint: 'A prompt in the corner when a call starts. Meetings and people below are recorded without asking.' },
-  { value: 'always', label: 'Record every call', hint: 'No prompt. The recording bar shows while Kasha records, and Stop ends it.' },
-  { value: 'rules', label: 'Only the meetings and people below', hint: 'No prompt for anything else. Start other recordings yourself.' }
+  {
+    value: 'ask',
+    label: 'Ask each time',
+    hint: 'A prompt in the corner when a call starts. Meetings and people under Always record are recorded without asking; meetings under Never record are left alone.'
+  },
+  { value: 'always', label: 'Record every call', hint: 'No prompt, except for meetings under Never record. The recording bar shows while Kasha records, and Stop ends it.' },
+  { value: 'rules', label: 'Only the meetings and people under Always record', hint: 'No prompt for anything else. Start other recordings yourself from New note.' }
 ]
+
+/** Every tag in use, with a count; rename one everywhere or drop it. */
+function TagList() {
+  const [tags, setTags] = useState<TagCount[] | null>(null)
+  const refresh = () => void window.kasha.listTags().then(setTags)
+  useEffect(() => {
+    refresh()
+    return window.kasha.onMeetingsChanged(refresh)
+  }, [])
+  if (!tags) return null
+  if (!tags.length) return <p className="text-[13px] text-muted">No tags on any note yet. The summary adds topic tags, and you can add your own under a note.</p>
+  return (
+    <div className="flex flex-col divide-y divide-border rounded-md border border-border bg-surface">
+      {tags.map((t) => (
+        <div key={t.tag} className="grid grid-cols-[1fr_auto_auto] items-center gap-2 px-2 py-1">
+          <LazyInput
+            aria-label={`Rename tag ${t.tag}`}
+            className="h-8 border-transparent bg-transparent px-1.5 text-[13px] hover:border-border"
+            value={`#${t.tag}`}
+            onCommit={(v) => {
+              const to = normTag(v)
+              if (to && to !== t.tag) void window.kasha.renameTag(t.tag, to).then(refresh)
+            }}
+          />
+          <span className="tabular text-xs text-muted">
+            {t.count} {t.count === 1 ? 'note' : 'notes'}
+          </span>
+          <Button variant="ghost" size="icon" aria-label={`Remove tag ${t.tag} from every note`} title="Remove from every note" onClick={() => void window.kasha.removeTag(t.tag).then(refresh)}>
+            <X className="size-3.5 text-muted" />
+          </Button>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 /** Runs the Outlook lookup once, so the user can see whether it works for them. */
 function CalendarCheck() {
@@ -300,8 +379,79 @@ function preview(s: SettingsT): string {
     .join('\n')
 }
 
+/** The three speech models, with what each trades off. Choosing one that isn't installed downloads it. */
+function ModelPicker({
+  settings,
+  status,
+  onChange,
+  refresh
+}: Props & { status: SetupStatus | null; refresh: () => void }) {
+  const choose = async (id: SpeechModelId) => {
+    await onChange({ speechModel: id })
+    refresh()
+    if (!status?.whisper.installed.includes(id)) void window.kasha.downloadWhisper()
+  }
+  return (
+    <div className="flex flex-col gap-2" role="radiogroup" aria-label="Speech model">
+      {SPEECH_MODELS.map((m) => {
+        const selected = settings.speechModel === m.id
+        const installed = !!status?.whisper.installed.includes(m.id)
+        const downloading = selected && !!status?.whisper.downloading
+        return (
+          <label
+            key={m.id}
+            className={cn(
+              'flex cursor-pointer items-start gap-3 rounded-md border px-3 py-2.5',
+              selected ? 'border-primary bg-surface' : 'border-border bg-surface hover:bg-sidebar'
+            )}
+          >
+            <input
+              type="radio"
+              name="speech-model"
+              className="mt-1 accent-[var(--color-primary)]"
+              checked={selected}
+              onChange={() => void choose(m.id)}
+            />
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="flex items-baseline justify-between gap-3">
+                <span>
+                  <span className="font-medium">{m.name}</span>
+                  <span className="text-muted"> · {m.tagline}</span>
+                </span>
+                <span className="tabular shrink-0 text-xs text-muted">
+                  {downloading
+                    ? `Downloading ${Math.round((status?.whisper.progress ?? 0) * 100)}%`
+                    : installed
+                      ? 'Installed'
+                      : selected && status?.whisper.error
+                        ? 'Download failed'
+                        : `${m.mb} MB download`}
+                </span>
+              </span>
+              <span className="text-xs text-muted">{m.detail}</span>
+              {selected && !installed && !downloading && status && (
+                <span className="pt-1">
+                  <Button size="sm" onClick={() => void window.kasha.downloadWhisper()}>
+                    {status.whisper.error ? 'Try the download again' : `Download (${status.whisper.downloadMb} MB)`}
+                  </Button>
+                  {status.whisper.error && <span className="ml-2 text-xs text-destructive">{status.whisper.error}</span>}
+                </span>
+              )}
+            </span>
+          </label>
+        )
+      })}
+      {status?.whisper.model === null && status.whisper.engine && !status.whisper.downloading && (
+        <p className="text-xs text-muted">
+          Until the download finishes, Kasha keeps transcribing with the {status.whisper.engine === 'parakeet' ? 'Parakeet' : 'Whisper'} model it has.
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function Settings({ settings, onChange }: Props) {
-  const [status] = useSetupStatus()
+  const [status, refreshStatus] = useSetupStatus()
   const ob = settings.obsidian
   const setOb = (patch: Partial<SettingsT['obsidian']>) => onChange({ obsidian: { ...ob, ...patch } })
   const rec = settings.recording
@@ -333,6 +483,26 @@ export function Settings({ settings, onChange }: Props) {
         </Field>
       </Section>
 
+      <Section title="Tags">
+        <Field group label="On every note" hint="Added to the tags of every note Kasha writes to Obsidian, so they're easy to find there.">
+          <NameList
+            items={settings.tags.defaults}
+            onChange={(defaults) => void onChange({ tags: { ...settings.tags, defaults: defaults.map(normTag).filter(Boolean) } })}
+            placeholder="Tag, e.g. meeting"
+            label="New standing tag"
+          />
+        </Field>
+        <Toggle
+          label="Let the summary add topic tags"
+          hint="One to three lowercase tags per note, from what was discussed. Off, notes only get the tags you add."
+          checked={settings.tags.fromSummary}
+          onChange={(v) => onChange({ tags: { ...settings.tags, fromSummary: v } })}
+        />
+        <Field group label="In use" hint="Rename a tag to change it on every note (two tags with the same name merge). Synced notes are written to Obsidian again.">
+          <TagList />
+        </Field>
+      </Section>
+
       <Section title="Recording">
         <div className="flex flex-col gap-2" role="radiogroup" aria-label="When a call starts">
           <span className="text-xs text-muted">When a call starts</span>
@@ -357,6 +527,9 @@ export function Settings({ settings, onChange }: Props) {
         </div>
         <Field group label="Always record these meetings" hint="Matched on the meeting’s title. When you record a recurring meeting, Kasha offers to add it here.">
           <NameList items={rec.meetings} onChange={(meetings) => void setRec({ meetings })} placeholder="Meeting title, e.g. Weekly product sync" label="New meeting title" />
+        </Field>
+        <Field group label="Never record these meetings" hint="Not recorded and not asked about, whichever option is chosen above. The call prompt has a “Never record this meeting” link that adds to this list.">
+          <NameList items={rec.never} onChange={(never) => void setRec({ never })} placeholder="Meeting title, e.g. 1:1 with my manager" label="New meeting title never to record" />
         </Field>
         {rec.declined.length > 0 && (
           <Field group label="Kasha won’t offer to always record" hint="You chose “Just this once” for these. Remove one to be asked again.">
@@ -399,27 +572,17 @@ export function Settings({ settings, onChange }: Props) {
       </Section>
 
       <Section title="Transcription">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex flex-col">
-            <span>Speech models</span>
-            <span className="text-xs text-muted">
-              {status?.whisper.engine === 'parakeet'
-                ? 'Parakeet, English. Runs on this PC.'
-                : status?.whisper.engine === 'whisper'
-                  ? 'Whisper small. The Parakeet download is about four times faster.'
-                  : 'Runs on this PC. Audio never leaves it.'}
-            </span>
-          </div>
-          {status?.whisper.downloading ? (
-            <span className="tabular text-[13px] text-muted">Downloading {Math.round(status.whisper.progress * 100)}%</span>
-          ) : status?.whisper.ready && status.whisper.engine === 'parakeet' && status.whisper.speakers ? (
-            <span className="text-[13px] text-ok">Installed</span>
-          ) : status ? (
+        <Field group label="Speech model" hint="All of them run on this PC, so audio never leaves it. Changing the model downloads it once.">
+          <ModelPicker settings={settings} status={status} onChange={onChange} refresh={refreshStatus} />
+        </Field>
+        {status && !status.whisper.speakers && !status.whisper.downloading && (
+          <div className="flex items-center justify-between gap-4 text-[13px]">
+            <span className="text-muted">The speaker models aren’t installed, so everyone on the call stays “Others”.</span>
             <Button size="sm" onClick={() => void window.kasha.downloadWhisper()}>
               Download ({status.whisper.downloadMb} MB)
             </Button>
-          ) : null}
-        </div>
+          </div>
+        )}
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-4">
             <div className="flex flex-col">
@@ -462,8 +625,8 @@ export function Settings({ settings, onChange }: Props) {
           />
         )}
         <Toggle
-          label="Keep audio after transcribing"
-          hint="Off by default. Audio is deleted once the transcript is saved."
+          label="Keep audio for 7 days after transcribing"
+          hint="Off by default: audio is deleted as soon as the transcript is saved. On, it stays on this PC for a week so you can listen back, then goes. To keep a recording for good, use Save a copy on the note."
           checked={settings.keepAudio}
           onChange={(v) => onChange({ keepAudio: v })}
         />
@@ -521,6 +684,7 @@ export function Settings({ settings, onChange }: Props) {
           checked={settings.launchAtLogin}
           onChange={(v) => onChange({ launchAtLogin: v })}
         />
+        <UpdateControls />
       </Section>
     </div>
   )

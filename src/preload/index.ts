@@ -12,12 +12,15 @@ const invoke = ipcRenderer.invoke.bind(ipcRenderer)
 const kasha: KashaApi = {
   listMeetings: () => invoke('meetings:list'),
   getMeeting: (id) => invoke('meetings:get', id),
+  saveAudio: (id) => invoke('meetings:saveAudio', id),
+  deleteAudio: (id) => invoke('meetings:deleteAudio', id),
   createNote: () => invoke('meetings:create'),
   updateMeeting: (id, patch) => invoke('meetings:update', id, patch),
   saveNote: (id, md) => invoke('meetings:saveNote', id, md),
   saveImage: (id, data, ext) => invoke('meetings:saveImage', id, data, ext),
   saveTranscript: (id, segments) => invoke('meetings:saveTranscript', id, segments),
   replaceText: (id, find, replace, opts) => invoke('meetings:replace', id, find, replace, opts),
+  rememberTerm: (heard, term) => invoke('vocab:remember', heard, term),
   resummarize: (id) => invoke('meetings:resummarize', id),
   deleteMeeting: (id) => invoke('meetings:delete', id),
   retry: (id) => invoke('meetings:retry', id),
@@ -26,6 +29,7 @@ const kasha: KashaApi = {
 
   listActions: () => invoke('actions:list'),
   setActionDone: (id, index, raw, done) => invoke('actions:setDone', id, index, raw, done),
+  removeAction: (id, index, raw) => invoke('actions:remove', id, index, raw),
 
   shareCopy: (id, opts) => invoke('share:copy', id, opts),
   shareEmail: (id, opts) => invoke('share:email', id, opts),
@@ -43,8 +47,17 @@ const kasha: KashaApi = {
   pickFolder: () => invoke('setup:pickFolder'),
   checkCalendar: () => invoke('calendar:check'),
 
+  listTags: () => invoke('tags:list'),
+  renameTag: (from, to) => invoke('tags:rename', from, to),
+  removeTag: (tag) => invoke('tags:remove', tag),
+
   listVoices: () => invoke('voices:list'),
   removeVoice: (name) => invoke('voices:remove', name),
+
+  appInfo: () => invoke('app:info'),
+  updateStatus: () => invoke('update:status'),
+  checkForUpdates: () => invoke('update:check'),
+  installUpdate: () => invoke('update:install'),
 
   openMeeting: (id) => ipcRenderer.send('win:openMeeting', id),
 
@@ -56,13 +69,15 @@ const kasha: KashaApi = {
   onRecordingChanged: (cb) => on('recording-changed', cb),
   onProgress: (cb) => on('progress', cb),
   onTranscriptLive: (cb) => on('transcript-live', cb),
-  onSettingsChanged: (cb) => on('settings-changed', cb)
+  onSettingsChanged: (cb) => on('settings-changed', cb),
+  onUpdateStatus: (cb) => on('update-status', cb)
 }
 
 const toast: ToastApi = {
   state: () => invoke('toast:state'),
   accept: () => ipcRenderer.send('toast:accept'),
-  dismiss: () => ipcRenderer.send('toast:dismiss')
+  dismiss: () => ipcRenderer.send('toast:dismiss'),
+  never: () => ipcRenderer.send('toast:never')
 }
 
 const bar: BarApi = {

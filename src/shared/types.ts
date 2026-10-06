@@ -31,6 +31,8 @@ export type MeetingStatus =
 
 export type SyncState = 'synced' | 'not-synced' | 'edited-in-obsidian' | 'error'
 
+export type Presence = 'present' | 'absent'
+
 export interface Meeting {
   id: string
   title: string
@@ -45,8 +47,10 @@ export interface Meeting {
   speakers?: Partial<Record<SpeakerId, string>>
   /** The title the meeting app showed when Kasha detected the call. Used to spot recurring meetings. */
   detectedTitle?: string
-  /** People invited, from the Outlook calendar, when that lookup is on. Names only. */
+  /** People invited, from the Outlook calendar when that lookup is on, or added by hand. Names only. */
   attendees?: string[]
+  /** Who was there, set by hand where the recording can't tell: by `attendanceKey(name)`. */
+  attendance?: Record<string, Presence>
   /**
    * Speakers the summary named from the conversation (someone was addressed by
    * name and they answered, say). The name is in `speakers`; this marks it as a
@@ -98,10 +102,48 @@ export interface VocabularyEntry {
   heardAs: string[]
 }
 
+/** Which speech model transcribes. All run on this PC. */
+export type SpeechModelId = 'parakeet' | 'parakeet-hq' | 'whisper-medium'
+
+export interface SpeechModelInfo {
+  id: SpeechModelId
+  name: string
+  tagline: string
+  detail: string
+  mb: number
+}
+
+export const SPEECH_MODELS: SpeechModelInfo[] = [
+  {
+    id: 'parakeet',
+    name: 'Quick',
+    tagline: 'Parakeet, 4-bit',
+    detail: 'Notes are ready a couple of minutes after the call ends. Right for most meetings.',
+    mb: 356
+  },
+  {
+    id: 'parakeet-hq',
+    name: 'Careful',
+    tagline: 'Parakeet, 8-bit',
+    detail: 'A little more accurate on quiet or accented speech. Somewhat slower, and uses about 850 MB of memory while it runs.',
+    mb: 669
+  },
+  {
+    id: 'whisper-medium',
+    name: 'Thorough',
+    tagline: 'Whisper medium',
+    detail:
+      'The most accurate on hard audio and jargon, and the only one that takes your Names and terms as spelling hints. Several times slower, so the transcript is ready a while after the call, and uses about 1 GB while it runs.',
+    mb: 539
+  }
+]
+
 export interface Settings {
   setupComplete: boolean
   launchAtLogin: boolean
   keepAudio: boolean
+  /** Which speech model transcribes. Downloaded when chosen. */
+  speechModel: SpeechModelId
   /** Which CLI writes summaries. Automatic prefers Claude Code, then Codex. */
   summaryEngine: 'auto' | 'claude' | 'codex'
   /** How the note taker is named in meetings, so their actions count as "mine". */
@@ -115,6 +157,12 @@ export interface Settings {
     recognize: boolean
   }
   vocabulary: VocabularyEntry[]
+  tags: {
+    /** Added to every note's tags in Obsidian, e.g. "meeting". */
+    defaults: string[]
+    /** Let the summary add one to three topic tags to each note. */
+    fromSummary: boolean
+  }
   reminders: {
     enabled: boolean
     time: string // HH:MM, weekdays
@@ -134,6 +182,8 @@ export interface Settings {
     declined: string[]
     /** People whose calls are always recorded: matched against the call's title and invite list. */
     people: string[]
+    /** Meeting titles never recorded and never asked about, whatever the mode. */
+    never: string[]
     /** Find the call in Outlook through Claude Code's Microsoft 365 connector, for attendee names. */
     lookupAttendees: boolean
     /** Hold off transcribing during a call while the PC is short of memory. Nothing is lost. */
@@ -153,14 +203,16 @@ export const DEFAULT_SETTINGS: Settings = {
   setupComplete: false,
   launchAtLogin: true,
   keepAudio: false,
+  speechModel: 'parakeet',
   summaryEngine: 'auto',
   myName: '',
   liveTranscription: true,
   speakers: { separate: true, recognize: true },
   vocabulary: [],
+  tags: { defaults: [], fromSummary: true },
   reminders: { enabled: true, time: '09:00' },
   detect: { teams: true, slack: true, ringcentral: true, zoom: true, browser: false },
-  recording: { mode: 'ask', meetings: [], declined: [], people: [], lookupAttendees: true, pauseWhenLowMemory: true },
+  recording: { mode: 'ask', meetings: [], declined: [], people: [], never: [], lookupAttendees: true, pauseWhenLowMemory: true },
   obsidian: {
     vault: '',
     folder: 'Meetings',
@@ -177,8 +229,12 @@ export interface SetupStatus {
     downloading: boolean
     progress: number
     error?: string
-    /** Which model transcribes. Parakeet is the current one; Whisper where only the older model is installed. */
+    /** Which engine transcribes right now: the chosen model's, or the older Whisper small where only it is installed. */
     engine: 'parakeet' | 'whisper' | null
+    /** The chosen model, when it is installed; null while it still has to be downloaded. */
+    model: SpeechModelId | null
+    /** Speech models already on this PC. */
+    installed: SpeechModelId[]
     /** The speaker models are installed. */
     speakers: boolean
     /** Size of what a download would fetch now. */
@@ -244,14 +300,58 @@ export interface ActionGroup {
 }
 
 /** What the renderer may change on a meeting. */
-export type MeetingPatch = Partial<Pick<Meeting, 'title' | 'tags' | 'speakers'>> & {
+export type MeetingPatch = Partial<Pick<Meeting, 'title' | 'tags' | 'speakers' | 'attendees'>> & {
   /** Accepts the guessed name for this speaker. */
   confirmSpeaker?: SpeakerId
+  /** By-hand attendance marks to merge in; null clears one. */
+  attendance?: Record<string, Presence | null>
 }
 
 export interface ShareOptions {
   summary: boolean // summary and notes
   transcript: boolean
+}
+
+/** Kasha's own updates, from the GitHub releases of the repo. */
+export interface UpdateStatus {
+  /**
+   * dev: running from source, where updates are off. downloading: a newer
+   * version is on its way. ready: downloaded, waiting for a restart.
+   */
+  state: 'dev' | 'idle' | 'checking' | 'downloading' | 'ready' | 'error'
+  version: string | null
+  message: string | null
+  /** How much of the download is done, 0 to 100. */
+  percent?: number
+}
+
+/** A tag and how many notes carry it. */
+export interface TagCount {
+  tag: string
+  count: number
+}
+
+/** Tags are lowercase, with hyphens for spaces and no leading "#", as Obsidian likes them. */
+export const normTag = (t: string): string =>
+  t
+    .trim()
+    .toLowerCase()
+    .replace(/^#+/, '')
+    .replace(/\s+/g, '-')
+    .replace(/[^\p{L}\p{N}\-_/]/gu, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+
+/** The recording still on disk for a meeting, and when Kasha will delete it. */
+export interface AudioInfo {
+  bytes: number
+  until: string // ISO
+}
+
+export interface AppInfo {
+  version: string
+  installed: boolean
 }
 
 export interface ReplaceOptions {
