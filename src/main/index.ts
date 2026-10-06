@@ -39,6 +39,7 @@ import {
 } from '@shared/types'
 import { listActions, ReminderScheduler, setActionDone } from './actions'
 import { lookupMeeting } from './calendar'
+import { log } from './log'
 import { MeetingDetector } from './detector'
 import { getLive, startLive, takeLive, type LiveTranscriber } from './live'
 import { syncToObsidian } from './obsidian'
@@ -284,12 +285,14 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
           () => store.getSettings().recording.pauseWhenLowMemory,
           (state) => {
             if (recording?.meetingId !== id) return
+            log('transcribing', { paused: state.paused ?? 'no' })
             broadcast('live-state', state)
             refreshTray()
           }
         )
       : null
   recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted }
+  log('recording-started', { app: meeting.app, how: opts.auto ? 'auto' : opts.accepted ? 'prompt' : 'manual', live: !!live })
   closeToast()
   if (opts.auto && Notification.isSupported()) {
     const n = new Notification({ title: 'Recording', body: `${meeting.title}. Kasha started automatically. Stop it from the bar.`, silent: true })
@@ -332,9 +335,10 @@ const pipelineEvents: PipelineEvents = {
 
 function finalizeRecording(): void {
   if (!recording) return
-  const { meetingId, rec } = recording
+  const { meetingId, rec, startedAt } = recording
   recording = null
   const tracks = rec.close()
+  log('recording-stopped', { tracks: tracks.join('+') || 'none', minutes: Math.round((Date.now() - startedAt) / 60_000) })
   store.updateMeeting(meetingId, {
     recordingEndedAt: new Date().toISOString(),
     status: tracks.length ? 'transcribing' : 'ready',
@@ -354,6 +358,7 @@ function finalizeRecording(): void {
 
 /** Stores the invite list and, for a generic window title, the calendar subject. */
 function onCalendar(id: string, match: CalendarMatch | null): void {
+  log('attendees', { found: !!match, people: match?.attendees.length, recurring: match?.recurring })
   const cur = store.getMeeting(id)
   if (!match || !cur) return
   const patch: Partial<Meeting> = { attendees: match.attendees }
@@ -377,22 +382,33 @@ function closeToast(): void {
   toast = null
 }
 
-function showToast(state: ToastState, ms = state.kind === 'detected' ? 90_000 : 30_000): void {
+/**
+ * The call prompt stays until it's answered or the call ends: Teams' pre-join
+ * screen takes the mic a minute or two before the meeting, and a prompt that
+ * timed out there was gone by the time the user joined. Other prompts close
+ * after 30 s.
+ */
+function showToast(state: ToastState): void {
   closeToast()
   toast = state
   toastWin = createToastWindow()
   toastWin.on('closed', () => (toastWin = null))
+  log('prompt-shown', { kind: state.kind })
+  if (state.kind === 'detected') return
   setTimeout(() => {
-    if (toast === state) closeToast()
-  }, ms)
+    if (toast !== state) return
+    log('prompt-expired', { kind: state.kind })
+    closeToast()
+  }, 30_000)
 }
 
 detector.on('start', (m: DetectedMeeting) => void onDetected(m))
 
 async function onDetected(m: DetectedMeeting): Promise<void> {
   const settings = store.getSettings()
-  if (recording || dismissed.has(m.app) || !settings.setupComplete) return
   const r = settings.recording
+  log('call-detected', { app: m.app, mode: r.mode, recording: !!recording, dismissed: dismissed.has(m.app), setup: settings.setupComplete })
+  if (recording || dismissed.has(m.app) || !settings.setupComplete) return
   // Started now so the invite list is ready by the time it's needed.
   const calendar = r.lookupAttendees ? lookupMeeting(m.title) : Promise.resolve(null)
   lookups.set(m.app, calendar)
@@ -405,6 +421,7 @@ async function onDetected(m: DetectedMeeting): Promise<void> {
 }
 
 detector.on('end', (appName: string) => {
+  log('call-ended', { app: appName, prompt: toast?.kind === 'detected' && toast.meeting.app === appName, recording: recording?.app === appName })
   dismissed.delete(appName)
   lookups.delete(appName)
   if (toast?.kind === 'detected' && toast.meeting.app === appName) closeToast()
@@ -593,6 +610,7 @@ function registerIpc(): void {
   ipcMain.on('toast:accept', async (e) => {
     if (!isOwnWindow(e.sender)) return
     const t = toast
+    log('prompt-accepted', { kind: t?.kind })
     closeToast()
     if (t?.kind === 'recurring') return addToRule('meetings', t.title)
     if (t?.kind !== 'detected') return
@@ -604,6 +622,7 @@ function registerIpc(): void {
   ipcMain.on('toast:dismiss', (e) => {
     if (!isOwnWindow(e.sender)) return
     const t = toast
+    log('prompt-dismissed', { kind: t?.kind })
     closeToast()
     if (t?.kind === 'detected') dismissed.add(t.meeting.app)
     if (t?.kind === 'recurring') addToRule('declined', t.title)
@@ -684,6 +703,7 @@ app.on('before-quit', () => {
 })
 
 app.whenReady().then(() => {
+  log('app-started', { version: app.getVersion(), installed: app.isPackaged, detect: !process.env.KASHA_NO_DETECT })
   const meetingsRoot = store.paths.meetings()
   protocol.handle('kasha-file', (req) => {
     const url = new URL(req.url)

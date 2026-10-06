@@ -1,5 +1,6 @@
 import { normName, type CalendarMatch } from '@shared/types'
 import { claudeExe } from './setup'
+import { log } from './log'
 import { emptyDir, run } from './summarizer'
 
 /**
@@ -147,13 +148,16 @@ export async function fetchEvents(at = new Date()): Promise<CalendarEvent[] | nu
     return Array.isArray(r?.events) ? r.events : []
   } catch (e) {
     console.error('calendar:', (e as Error).message)
+    log('calendar-failed', { error: (e as Error).message.slice(0, 200) })
     return null
   }
 }
 
 export async function lookupMeeting(title: string, at = new Date()): Promise<CalendarMatch | null> {
+  const t0 = Date.now()
   const events = await fetchEvents(at)
   const event = events && pickEvent(events, title, at)
+  log('calendar', { events: events?.length ?? 'error', matched: !!event, secs: Math.round((Date.now() - t0) / 1000) })
   if (!event) return null
   const attendees = Array.from(
     new Set(
