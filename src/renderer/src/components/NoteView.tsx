@@ -2,6 +2,7 @@ import { ExternalLink, Loader2, RefreshCw, Trash2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { Meeting, RecordingInfo, Settings, TranscriptSegment } from '@shared/types'
 import { cn, hhmm, meetingMeta, timer } from '@/lib/utils'
+import { Attendees } from './Attendees'
 import { Editor } from './Editor'
 import { SharePopover } from './SharePopover'
 import { Transcript } from './Transcript'
@@ -14,7 +15,7 @@ interface Props {
   settings: Settings
 }
 
-type Tab = 'notes' | 'transcript'
+type Tab = 'notes' | 'transcript' | 'attendees'
 
 function useNow(active: boolean): number {
   const [now, setNow] = useState(Date.now())
@@ -254,7 +255,7 @@ export function NoteView(props: Props) {
       </header>
 
       <div role="tablist" className="mt-5 flex gap-6 border-b border-border px-10 max-[820px]:px-6">
-        {(['notes', 'transcript'] as Tab[]).map((t) => (
+        {(['notes', 'transcript', 'attendees'] as Tab[]).map((t) => (
           <button
             key={t}
             role="tab"
@@ -265,7 +266,7 @@ export function NoteView(props: Props) {
               tab === t ? 'border-primary text-foreground' : 'border-transparent text-muted hover:text-foreground'
             )}
           >
-            {t === 'notes' ? 'Notes' : 'Transcript'}
+            {t === 'notes' ? 'Notes' : t === 'transcript' ? 'Transcript' : 'Attendees'}
           </button>
         ))}
       </div>
@@ -289,6 +290,9 @@ export function NoteView(props: Props) {
             onSave={writing ? undefined : saveTranscript}
             onReplaced={reload}
           />
+        )}
+        {data && tab === 'attendees' && (
+          <Attendees meeting={meeting} segments={data.transcript} settings={props.settings} onShowTranscript={() => setTab('transcript')} />
         )}
       </div>
     </div>

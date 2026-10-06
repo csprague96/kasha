@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
+import { attendance, attendanceSummary } from '@shared/attendance'
 import { APP_LABELS, speakerName, type Meeting, type Settings, type TranscriptSegment } from '@shared/types'
 import { paths } from './store'
 
@@ -48,6 +49,9 @@ export function buildMarkdown(
     const mins = Math.round((Date.parse(m.recordingEndedAt) - Date.parse(m.recordingStartedAt)) / 60000)
     fm.push(`duration: ${mins}m`)
   }
+  const who = attendanceSummary(attendance(m, transcript, ''))
+  if (who.present.length) fm.push(`attendees: [${who.present.map(yamlString).join(', ')}]`)
+  if (who.absent.length) fm.push(`not_heard: [${who.absent.map(yamlString).join(', ')}]`)
   fm.push(`tags: [${m.tags.map(yamlString).join(', ')}]`, 'source: kasha', '---', '')
 
   // Local image links become Obsidian embeds, or are dropped if attachments are off.

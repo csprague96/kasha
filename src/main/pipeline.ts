@@ -73,7 +73,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
       if (sys && store.getSettings().speakers.separate && speakersReady() && transcript.some((s) => s.speaker === 'others')) {
         set({ status: 'separating' })
         try {
-          const r = await separateSpeakers(id, sys.file, transcript)
+          const r = await separateSpeakers(id, sys.file, transcript, store.getMeeting(id)?.attendees)
           transcript = r.transcript
           log('speakers', { found: new Set(transcript.filter((s) => s.speaker !== 'you').map((s) => s.speaker)).size, recognised: Object.keys(r.names).length, secs: secs() })
           store.writeTranscript(id, transcript)

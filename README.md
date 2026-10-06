@@ -24,9 +24,13 @@ Due dates are stored in the note as `(due 2026-10-06)`. Shared copies show them 
 ### Transcript
 
 - **Speakers**: after the call, the people on the computer's audio are told apart as **Speaker 1**, **Speaker 2** and so on (your mic is always **You**). Select a name at the top of the transcript to rename it everywhere. Select the name on a line to move that line to someone else, or to **Someone else** for a new speaker. The summary uses the names after you select **Update summary**.
-- **Recognising people**: when you name a speaker, Kasha keeps that voice (a short list of numbers, not audio) in `voices.json` on your PC. Next time the same person is on a call, the name is filled in. Settings lists the learned voices and lets you forget one; turn **Recognise people from past meetings** off to stop learning. Kasha never looks up attendees in your calendar.
+- **Recognising people**: when you name a speaker, Kasha keeps that voice (a short list of numbers, not audio) in `voices.json` on your PC. Next time the same person is on a call, the name is filled in. Settings lists the learned voices and lets you forget one; turn **Recognise people from past meetings** off to stop learning. With the attendee lookup on, the invite list from Outlook is offered when you rename a speaker.
 - **Edit**: select a line to fix it. Enter saves and Esc cancels.
 - **Find and replace** (Ctrl+H): replaces whole words in the transcript and, optionally, the note. **Fix in future meetings too** adds the correction to **Names and terms**.
+
+### Attendees
+
+The **Attendees** tab lists who was at the meeting: the invite list (from Outlook when the attendee lookup is on, or people you add) against who was heard on the recording. Someone on the list who matches a named speaker shows as **Spoke** with their talking time; someone who doesn't is **Not heard**. People heard but not on the list are listed too, including unnamed speakers until you name them in the Transcript tab. A recording can't tell a silent attendee from a no-show, so hover a row to mark a person present or absent by hand, or to remove them from the list. The names go into the Obsidian note's front matter as `attendees` and `not_heard`, and onto the first line of shared copies.
 
 ### Names and terms
 

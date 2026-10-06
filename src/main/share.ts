@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Marked } from 'marked'
+import { attendance, attendanceSummary } from '@shared/attendance'
 import { APP_LABELS, speakerName, type Meeting, type ShareOptions, type TranscriptSegment } from '@shared/types'
 import { exportFileName } from './obsidian'
 import * as store from './store'
@@ -26,6 +27,13 @@ function metaLine(m: Meeting): string {
 /** The shareable note as Markdown. Image links stay relative (attachments/x.png). */
 export function shareMarkdown(m: Meeting, note: string, transcript: TranscriptSegment[], opts: ShareOptions): string {
   const out = [`# ${m.title}`, '', metaLine(m), '']
+  const who = attendanceSummary(attendance(m, transcript, store.getSettings().myName))
+  if (who.present.length || who.absent.length) {
+    const parts = []
+    if (who.present.length) parts.push(`**Attendees:** ${who.present.join(', ')}`)
+    if (who.absent.length) parts.push(`**Not heard:** ${who.absent.join(', ')}`)
+    out.push(parts.join(' · '), '')
+  }
   if (opts.summary) {
     // Readers get "due Tue 6 Oct"; the ISO date is only for Kasha's Actions view.
     const readable = note.replace(/\(due (\d{4})-(\d{2})-(\d{2})\)/g, (_m, y: string, mo: string, d: string) => {

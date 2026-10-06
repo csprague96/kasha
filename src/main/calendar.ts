@@ -75,7 +75,7 @@ function prompt(at: Date): string {
   const soon = new Date(at.getTime() + 15 * 60_000)
   return [
     `Search arguments: query "*", afterDateTime "${wall(from)}", beforeDateTime "${wall(to)}", order "oldest", limit 25.`,
-    `Time window: events that start at or before ${wall(soon).slice(0, 16)} and end after ${wall(at).slice(0, 16)} (local wall-clock, ${hm(at)} now), and aren't cancelled. Read the full details of those and list them.`
+    `Time window: events that start at or before ${wall(soon).slice(0, 16)} and end after ${wall(new Date(at.getTime() - 30 * 60_000)).slice(0, 16)} (local wall-clock, ${hm(at)} now; meetings run over), and aren't cancelled. Read the full details of those and list them.`
   ].join('\n')
 }
 
@@ -103,7 +103,14 @@ export function pickEvent(events: CalendarEvent[], title: string, at: Date): Cal
   })
   const sameTitle = live.filter((e) => e.subject && normName(e.subject) === normName(title))
   const pool = sameTitle.length ? sameTitle : live
-  return pool.sort((a, b) => parseTime(b.start, b.timeZone) - parseTime(a.start, a.timeZone))[0] ?? null
+  const current = pool.sort((a, b) => parseTime(b.start, b.timeZone) - parseTime(a.start, a.timeZone))[0]
+  if (current) return current
+  // Nothing scheduled now: meetings run over, so take one that ended in the last half hour.
+  const overran = events.filter((e) => {
+    const end = parseTime(e.end, e.timeZone)
+    return !e.cancelled && end <= now && end > now - 30 * 60_000
+  })
+  return overran.sort((a, b) => parseTime(b.end, b.timeZone) - parseTime(a.end, a.timeZone))[0] ?? null
 }
 
 /**

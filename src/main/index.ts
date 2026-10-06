@@ -472,6 +472,20 @@ function registerIpc(): void {
       for (const k of Object.keys(guesses) as SpeakerId[]) if (names[k] !== before?.speakers?.[k]) delete guesses[k]
       clean.speakerGuesses = guesses
     }
+    if (Array.isArray(patch.attendees)) {
+      const names = patch.attendees.filter((a): a is string => typeof a === 'string').map((a) => a.trim().slice(0, 80)).filter(Boolean)
+      clean.attendees = Array.from(new Set(names)).slice(0, 100)
+    }
+    if (patch.attendance && typeof patch.attendance === 'object') {
+      const marks = { ...before?.attendance }
+      for (const [k, v] of Object.entries(patch.attendance)) {
+        const key = normName(String(k)).slice(0, 80)
+        if (!key) continue
+        if (v === 'present' || v === 'absent') marks[key] = v
+        else delete marks[key]
+      }
+      clean.attendance = marks
+    }
     const confirm = patch.confirmSpeaker
     if (isSpeakerId(confirm) && before?.speakerGuesses?.[confirm] && before.speakers?.[confirm]) {
       const { [confirm]: _, ...rest } = before.speakerGuesses

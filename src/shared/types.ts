@@ -31,6 +31,8 @@ export type MeetingStatus =
 
 export type SyncState = 'synced' | 'not-synced' | 'edited-in-obsidian' | 'error'
 
+export type Presence = 'present' | 'absent'
+
 export interface Meeting {
   id: string
   title: string
@@ -45,8 +47,10 @@ export interface Meeting {
   speakers?: Partial<Record<SpeakerId, string>>
   /** The title the meeting app showed when Kasha detected the call. Used to spot recurring meetings. */
   detectedTitle?: string
-  /** People invited, from the Outlook calendar, when that lookup is on. Names only. */
+  /** People invited, from the Outlook calendar when that lookup is on, or added by hand. Names only. */
   attendees?: string[]
+  /** Who was there, set by hand where the recording can't tell: by `attendanceKey(name)`. */
+  attendance?: Record<string, Presence>
   /**
    * Speakers the summary named from the conversation (someone was addressed by
    * name and they answered, say). The name is in `speakers`; this marks it as a
@@ -244,9 +248,11 @@ export interface ActionGroup {
 }
 
 /** What the renderer may change on a meeting. */
-export type MeetingPatch = Partial<Pick<Meeting, 'title' | 'tags' | 'speakers'>> & {
+export type MeetingPatch = Partial<Pick<Meeting, 'title' | 'tags' | 'speakers' | 'attendees'>> & {
   /** Accepts the guessed name for this speaker. */
   confirmSpeaker?: SpeakerId
+  /** By-hand attendance marks to merge in; null clears one. */
+  attendance?: Record<string, Presence | null>
 }
 
 export interface ShareOptions {
