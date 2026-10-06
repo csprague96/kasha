@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { applyVocabulary } from '@shared/text'
 import { GENERIC_TITLE, type Meeting } from '@shared/types'
 import { takeLive } from './live'
+import { log } from './log'
 import { syncToObsidian } from './obsidian'
 import type { Track } from './recorder'
 import { redact } from './redact'
@@ -40,6 +41,8 @@ function audioTracks(id: string): Array<{ track: Track; file: string }> {
 }
 
 async function run(id: string, ev: PipelineEvents): Promise<void> {
+  const t0 = Date.now()
+  const secs = () => Math.round((Date.now() - t0) / 1000)
   const set = (patch: Partial<Meeting>) => {
     const m = store.updateMeeting(id, patch)
     ev.changed(id)
@@ -63,6 +66,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
       transcript = segs.map((s) => ({ ...s, text: cleanText(s.text) }))
       store.writeTranscript(id, transcript)
       ev.progress(id, null)
+      log('transcribed', { lines: transcript.length, fromLive: !!fromLive, secs: secs() })
 
       // Tell the people on the computer's audio apart, and name voices known from past meetings.
       const sys = tracks.find((t) => t.track === 'sys')
@@ -71,12 +75,14 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
         try {
           const r = await separateSpeakers(id, sys.file, transcript)
           transcript = r.transcript
+          log('speakers', { found: new Set(transcript.filter((s) => s.speaker !== 'you').map((s) => s.speaker)).size, recognised: Object.keys(r.names).length, secs: secs() })
           store.writeTranscript(id, transcript)
           const m = store.getMeeting(id)!
           set({ speakers: { ...r.names, ...m.speakers } })
         } catch (e) {
           // Not worth failing the meeting over: everyone stays "Others".
           console.error('speakers:', (e as Error).message)
+          log('speakers-failed', { error: (e as Error).message.slice(0, 200) })
         }
       }
     } else {
@@ -108,6 +114,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
       // Names worked out from the conversation are shown as guesses until confirmed.
       // They aren't learned as voices until then.
       const { names, guesses } = speakerGuesses(s, transcript, meeting.speakers)
+      log('summarized', { engine: s.engine, guessedNames: Object.keys(guesses).length, secs: secs() })
       set({
         speakers: { ...meeting.speakers, ...names },
         speakerGuesses: { ...meeting.speakerGuesses, ...guesses },
@@ -130,6 +137,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
   } catch (e) {
     live?.stop()
     ev.progress(id, null)
+    log('processing-failed', { error: (e as Error).message.slice(0, 200), secs: secs() })
     // Audio is kept on failure so Retry can pick up where this left off.
     set({ status: 'failed', error: (e as Error).message })
   }
