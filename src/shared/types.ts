@@ -102,10 +102,48 @@ export interface VocabularyEntry {
   heardAs: string[]
 }
 
+/** Which speech model transcribes. All run on this PC. */
+export type SpeechModelId = 'parakeet' | 'parakeet-hq' | 'whisper-medium'
+
+export interface SpeechModelInfo {
+  id: SpeechModelId
+  name: string
+  tagline: string
+  detail: string
+  mb: number
+}
+
+export const SPEECH_MODELS: SpeechModelInfo[] = [
+  {
+    id: 'parakeet',
+    name: 'Quick',
+    tagline: 'Parakeet, 4-bit',
+    detail: 'Notes are ready a couple of minutes after the call ends. Right for most meetings.',
+    mb: 356
+  },
+  {
+    id: 'parakeet-hq',
+    name: 'Careful',
+    tagline: 'Parakeet, 8-bit',
+    detail: 'A little more accurate on quiet or accented speech. Somewhat slower, and uses about 850 MB of memory while it runs.',
+    mb: 669
+  },
+  {
+    id: 'whisper-medium',
+    name: 'Thorough',
+    tagline: 'Whisper medium',
+    detail:
+      'The most accurate on hard audio and jargon, and the only one that takes your Names and terms as spelling hints. Several times slower, so the transcript is ready a while after the call, and uses about 1 GB while it runs.',
+    mb: 539
+  }
+]
+
 export interface Settings {
   setupComplete: boolean
   launchAtLogin: boolean
   keepAudio: boolean
+  /** Which speech model transcribes. Downloaded when chosen. */
+  speechModel: SpeechModelId
   /** Which CLI writes summaries. Automatic prefers Claude Code, then Codex. */
   summaryEngine: 'auto' | 'claude' | 'codex'
   /** How the note taker is named in meetings, so their actions count as "mine". */
@@ -157,6 +195,7 @@ export const DEFAULT_SETTINGS: Settings = {
   setupComplete: false,
   launchAtLogin: true,
   keepAudio: false,
+  speechModel: 'parakeet',
   summaryEngine: 'auto',
   myName: '',
   liveTranscription: true,
@@ -181,8 +220,12 @@ export interface SetupStatus {
     downloading: boolean
     progress: number
     error?: string
-    /** Which model transcribes. Parakeet is the current one; Whisper where only the older model is installed. */
+    /** Which engine transcribes right now: the chosen model's, or the older Whisper small where only it is installed. */
     engine: 'parakeet' | 'whisper' | null
+    /** The chosen model, when it is installed; null while it still has to be downloaded. */
+    model: SpeechModelId | null
+    /** Speech models already on this PC. */
+    installed: SpeechModelId[]
     /** The speaker models are installed. */
     speakers: boolean
     /** Size of what a download would fetch now. */

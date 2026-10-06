@@ -3,9 +3,11 @@ import { useEffect, useState, type ReactNode } from 'react'
 import {
   APP_LABELS,
   normName,
+  SPEECH_MODELS,
   type CalendarMatch,
   type SetupStatus,
   type Settings as SettingsT,
+  type SpeechModelId,
   type VocabularyEntry,
   type VoiceProfile
 } from '@shared/types'
@@ -301,8 +303,79 @@ function preview(s: SettingsT): string {
     .join('\n')
 }
 
+/** The three speech models, with what each trades off. Choosing one that isn't installed downloads it. */
+function ModelPicker({
+  settings,
+  status,
+  onChange,
+  refresh
+}: Props & { status: SetupStatus | null; refresh: () => void }) {
+  const choose = async (id: SpeechModelId) => {
+    await onChange({ speechModel: id })
+    refresh()
+    if (!status?.whisper.installed.includes(id)) void window.kasha.downloadWhisper()
+  }
+  return (
+    <div className="flex flex-col gap-2" role="radiogroup" aria-label="Speech model">
+      {SPEECH_MODELS.map((m) => {
+        const selected = settings.speechModel === m.id
+        const installed = !!status?.whisper.installed.includes(m.id)
+        const downloading = selected && !!status?.whisper.downloading
+        return (
+          <label
+            key={m.id}
+            className={cn(
+              'flex cursor-pointer items-start gap-3 rounded-md border px-3 py-2.5',
+              selected ? 'border-primary bg-surface' : 'border-border bg-surface hover:bg-sidebar'
+            )}
+          >
+            <input
+              type="radio"
+              name="speech-model"
+              className="mt-1 accent-[var(--color-primary)]"
+              checked={selected}
+              onChange={() => void choose(m.id)}
+            />
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="flex items-baseline justify-between gap-3">
+                <span>
+                  <span className="font-medium">{m.name}</span>
+                  <span className="text-muted"> · {m.tagline}</span>
+                </span>
+                <span className="tabular shrink-0 text-xs text-muted">
+                  {downloading
+                    ? `Downloading ${Math.round((status?.whisper.progress ?? 0) * 100)}%`
+                    : installed
+                      ? 'Installed'
+                      : selected && status?.whisper.error
+                        ? 'Download failed'
+                        : `${m.mb} MB download`}
+                </span>
+              </span>
+              <span className="text-xs text-muted">{m.detail}</span>
+              {selected && !installed && !downloading && status && (
+                <span className="pt-1">
+                  <Button size="sm" onClick={() => void window.kasha.downloadWhisper()}>
+                    {status.whisper.error ? 'Try the download again' : `Download (${status.whisper.downloadMb} MB)`}
+                  </Button>
+                  {status.whisper.error && <span className="ml-2 text-xs text-destructive">{status.whisper.error}</span>}
+                </span>
+              )}
+            </span>
+          </label>
+        )
+      })}
+      {status?.whisper.model === null && status.whisper.engine && !status.whisper.downloading && (
+        <p className="text-xs text-muted">
+          Until the download finishes, Kasha keeps transcribing with the {status.whisper.engine === 'parakeet' ? 'Parakeet' : 'Whisper'} model it has.
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function Settings({ settings, onChange }: Props) {
-  const [status] = useSetupStatus()
+  const [status, refreshStatus] = useSetupStatus()
   const ob = settings.obsidian
   const setOb = (patch: Partial<SettingsT['obsidian']>) => onChange({ obsidian: { ...ob, ...patch } })
   const rec = settings.recording
@@ -400,27 +473,17 @@ export function Settings({ settings, onChange }: Props) {
       </Section>
 
       <Section title="Transcription">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex flex-col">
-            <span>Speech models</span>
-            <span className="text-xs text-muted">
-              {status?.whisper.engine === 'parakeet'
-                ? 'Parakeet, English. Runs on this PC.'
-                : status?.whisper.engine === 'whisper'
-                  ? 'Whisper small. The Parakeet download is about four times faster.'
-                  : 'Runs on this PC. Audio never leaves it.'}
-            </span>
-          </div>
-          {status?.whisper.downloading ? (
-            <span className="tabular text-[13px] text-muted">Downloading {Math.round(status.whisper.progress * 100)}%</span>
-          ) : status?.whisper.ready && status.whisper.engine === 'parakeet' && status.whisper.speakers ? (
-            <span className="text-[13px] text-ok">Installed</span>
-          ) : status ? (
+        <Field group label="Speech model" hint="All of them run on this PC, so audio never leaves it. Changing the model downloads it once.">
+          <ModelPicker settings={settings} status={status} onChange={onChange} refresh={refreshStatus} />
+        </Field>
+        {status && !status.whisper.speakers && !status.whisper.downloading && (
+          <div className="flex items-center justify-between gap-4 text-[13px]">
+            <span className="text-muted">The speaker models aren’t installed, so everyone on the call stays “Others”.</span>
             <Button size="sm" onClick={() => void window.kasha.downloadWhisper()}>
               Download ({status.whisper.downloadMb} MB)
             </Button>
-          ) : null}
-        </div>
+          </div>
+        )}
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-4">
             <div className="flex flex-col">

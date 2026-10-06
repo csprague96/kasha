@@ -3,7 +3,7 @@ import { closeSync, openSync, readFileSync, readSync, rmSync, writeFileSync } fr
 import { constants, cpus, setPriority } from 'node:os'
 import type { Settings, SpeakerId, TranscriptSegment } from '@shared/types'
 import { SAMPLE_RATE, wavHeader } from './recorder'
-import { speechEngine, whisperPaths } from './setup'
+import { speechModel, whisperPaths } from './setup'
 
 /**
  * Speech models work best on short stretches of audio. Run over a whole track,
@@ -286,31 +286,31 @@ export async function transcribeChunk(
   opts: WhisperOptions,
   tmp: string
 ): Promise<TranscriptSegment[]> {
-  const engine = speechEngine()
-  if (!engine) throw new Error('Speech model is not installed.')
+  const model = speechModel()
+  if (!model) throw new Error('Speech model is not installed.')
   const wav = `${tmp}.wav`
   writeChunk(track, chunk, wav)
   try {
-    if (engine === 'parakeet') {
+    if (model.engine === 'parakeet') {
       const cli = whisperPaths.parakeetCli()!
-      const args = ['-m', whisperPaths.parakeet(), '-f', wav, '-t', String(opts.threads), '-ps', '-np']
+      const args = ['-m', model.file, '-f', wav, '-t', String(opts.threads), '-ps', '-np']
       const { code, err } = await exclusive(() => run(cli, args, true))
       if (code !== 0) throw new Error(`Transcription failed (exit ${code}). ${lastLine(err)}`)
       return toLines(parakeetGroups(err), chunk, speaker)
     }
     const cli = whisperPaths.cli()!
     const args = [
-      '-m', whisperPaths.model(),
+      '-m', model.file,
       '-f', wav,
       '-l', 'en',
       '-t', String(opts.threads),
       // Greedy decoding: the same words as beam search in testing, for less CPU.
       '-bs', '1', '-bo', '1',
-      // Word timings from attention alignment (preset for the small.en model),
-      // so each word maps back to the piece it was said in. Whisper's own word
-      // times drift by a few words. Alignment needs flash attention off, which
-      // costs about a third more CPU, but without it lines split mid-sentence.
-      '--dtw', 'small.en', '-nfa',
+      // Word timings from attention alignment (a preset per model), so each
+      // word maps back to the piece it was said in. Whisper's own word times
+      // drift by a few words. Alignment needs flash attention off, which costs
+      // about a third more CPU, but without it lines split mid-sentence.
+      '--dtw', model.dtw ?? 'small.en', '-nfa',
       '-ojf', '-of', tmp,
       '-np'
     ]
