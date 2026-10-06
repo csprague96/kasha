@@ -32,6 +32,8 @@ export interface KashaApi {
   saveTranscript(id: string, segments: TranscriptSegment[]): Promise<void>
   /** Whole-word find and replace in the transcript, and optionally the note. Returns how many were replaced. */
   replaceText(id: string, find: string, replace: string, opts: ReplaceOptions): Promise<{ transcript: number; notes: number }>
+  /** Adds a correction to Names and terms: `heard` is replaced by `term` in future transcripts. */
+  rememberTerm(heard: string, term: string): Promise<void>
   /** Rewrites the summary from the current transcript and speaker names. */
   resummarize(id: string): Promise<void>
   deleteMeeting(id: string): Promise<void>

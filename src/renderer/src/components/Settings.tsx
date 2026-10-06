@@ -131,10 +131,25 @@ const splitList = (v: string) =>
     .map((x) => x.trim())
     .filter(Boolean)
 
-/** Names and product terms the speech model should spell right. */
+const FILTER_FROM = 6 // entries before a filter box appears
+const LETTERS_FROM = 12 // entries before they're grouped by first letter, like a dictionary
+
+/** Names and product terms the speech model should spell right, laid out like a dictionary once there are many. */
 function Vocabulary({ entries, onChange }: { entries: VocabularyEntry[]; onChange: (v: VocabularyEntry[]) => void }) {
   const [term, setTerm] = useState('')
   const [heard, setHeard] = useState('')
+  const [filter, setFilter] = useState('')
+  // Alphabetical, keeping each entry's index in the saved list so edits land on the right one.
+  const sorted = entries
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => a.e.term.localeCompare(b.e.term, undefined, { sensitivity: 'base' }))
+  const q = filter.trim().toLowerCase()
+  const shown = q ? sorted.filter(({ e }) => e.term.toLowerCase().includes(q) || e.heardAs.some((h) => h.toLowerCase().includes(q))) : sorted
+  const letterOf = (t: string) => {
+    const c = t.trim().charAt(0).toUpperCase()
+    return /[A-Z]/.test(c) ? c : /\p{L}/u.test(c) ? c : '#'
+  }
+  const grouped = entries.length >= LETTERS_FROM
   const add = () => {
     const t = term.trim()
     if (!t) return
@@ -150,12 +165,8 @@ function Vocabulary({ entries, onChange }: { entries: VocabularyEntry[]; onChang
   }
   const update = (i: number, patch: Partial<VocabularyEntry>) => onChange(entries.map((e, j) => (j === i ? { ...e, ...patch } : e)))
 
-  return (
-    <div className="flex flex-col gap-3">
-      {entries.length > 0 && (
-        <div className="flex flex-col divide-y divide-border rounded-md border border-border bg-surface">
-          {entries.map((e, i) => (
-            <div key={`${e.term}-${i}`} className="grid grid-cols-[1fr_1fr_auto] items-center gap-2 px-2 py-1.5">
+  const row = ({ e, i }: { e: VocabularyEntry; i: number }) => (
+    <div key={`${e.term}-${i}`} className="grid grid-cols-[1fr_1fr_auto] items-center gap-2 px-2 py-1.5">
               <LazyInput
                 aria-label="Name or term"
                 className="h-8 border-transparent bg-transparent px-1.5 font-medium hover:border-border"
@@ -172,10 +183,34 @@ function Vocabulary({ entries, onChange }: { entries: VocabularyEntry[]; onChang
               <Button variant="ghost" size="icon" aria-label={`Remove ${e.term}`} onClick={() => onChange(entries.filter((_, j) => j !== i))}>
                 <X className="text-muted" />
               </Button>
+    </div>
+  )
+
+  return (
+    <div className="flex flex-col gap-3">
+      {entries.length >= FILTER_FROM && (
+        <div className="flex items-center gap-3">
+          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Find a name or term" aria-label="Find a name or term" className="h-8 max-w-xs text-[13px]" />
+          <span className="tabular text-xs text-muted">
+            {q ? `${shown.length} of ` : ''}
+            {entries.length} {entries.length === 1 ? 'entry' : 'entries'}
+          </span>
+        </div>
+      )}
+      {shown.length > 0 && !grouped && <div className="flex flex-col divide-y divide-border rounded-md border border-border bg-surface">{shown.map(row)}</div>}
+      {shown.length > 0 && grouped && (
+        <div className="flex flex-col gap-3">
+          {Array.from(new Set(shown.map(({ e }) => letterOf(e.term)))).map((letter) => (
+            <div key={letter} className="flex flex-col gap-1">
+              <div className="px-1 font-mono text-xs font-medium text-muted">{letter}</div>
+              <div className="flex flex-col divide-y divide-border rounded-md border border-border bg-surface">
+                {shown.filter(({ e }) => letterOf(e.term) === letter).map(row)}
+              </div>
             </div>
           ))}
         </div>
       )}
+      {q && shown.length === 0 && <p className="text-[13px] text-muted">Nothing matches “{filter.trim()}”.</p>}
       <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
         <Input value={term} onChange={(e) => setTerm(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} placeholder="Name or term, e.g. RCVR" aria-label="New name or term" />
         <Input value={heard} onChange={(e) => setHeard(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} placeholder="Often heard as, e.g. Recover" aria-label="Often heard as" />

@@ -595,6 +595,7 @@ function registerIpc(): void {
     if (inNotes) broadcast('actions-changed')
     return { transcript: inTranscript, notes: inNotes }
   })
+  handle('vocab:remember', (heard: string, term: string) => rememberTerm(String(heard).slice(0, 80), String(term).slice(0, 80)))
   handle('meetings:resummarize', (id: string) => {
     const m = store.getMeeting(id)
     if (!m || (m.status !== 'ready' && m.status !== 'failed') || !store.readTranscript(id).length) return

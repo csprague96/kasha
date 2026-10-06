@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AudioInfo, Meeting, RecordingInfo, Settings, TranscriptSegment } from '@shared/types'
 import { cn, hhmm, meetingMeta, timer } from '@/lib/utils'
 import { Attendees } from './Attendees'
+import { CorrectWord, type WordAt } from './CorrectWord'
 import { Editor } from './Editor'
 import { SharePopover } from './SharePopover'
 import { Transcript } from './Transcript'
@@ -276,6 +277,14 @@ export function NoteView(props: Props) {
   }
 
   const processing = meeting.status === 'summarizing'
+  // Right-click on a word in the note: correct it in the note and transcript.
+  const [correct, setCorrect] = useState<WordAt | null>(null)
+  const [corrected, setCorrected] = useState<string | null>(null)
+  useEffect(() => {
+    if (!corrected) return
+    const t = window.setTimeout(() => setCorrected(null), 4000)
+    return () => window.clearTimeout(t)
+  }, [corrected])
   const syncedAt = meeting.sync.state === 'synced' && meeting.sync.at ? ` · Synced ${hhmm(new Date(meeting.sync.at))}` : ''
 
   return (
@@ -314,7 +323,25 @@ export function NoteView(props: Props) {
         {/* The editor stays mounted on the Transcript tab, so it never shows an older copy of the note. */}
         {data && (
           <div className={cn('flex flex-col gap-6', tab !== 'notes' && 'hidden')}>
-            <Editor meetingId={meeting.id} markdown={data.note} version={data.version} editable={!processing} />
+            <Editor meetingId={meeting.id} markdown={data.note} version={data.version} editable={!processing} onCorrect={setCorrect} />
+            {corrected && (
+              <p className="-mt-3 text-[13px] text-muted" role="status">
+                {corrected}
+              </p>
+            )}
+            {correct && (
+              <CorrectWord
+                meetingId={meeting.id}
+                at={correct}
+                canReplace={!writing && !processing}
+                onClose={() => setCorrect(null)}
+                onDone={(text) => {
+                  setCorrect(null)
+                  setCorrected(text)
+                  reload()
+                }}
+              />
+            )}
             <Tags meeting={meeting} />
           </div>
         )}

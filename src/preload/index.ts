@@ -20,6 +20,7 @@ const kasha: KashaApi = {
   saveImage: (id, data, ext) => invoke('meetings:saveImage', id, data, ext),
   saveTranscript: (id, segments) => invoke('meetings:saveTranscript', id, segments),
   replaceText: (id, find, replace, opts) => invoke('meetings:replace', id, find, replace, opts),
+  rememberTerm: (heard, term) => invoke('vocab:remember', heard, term),
   resummarize: (id) => invoke('meetings:resummarize', id),
   deleteMeeting: (id) => invoke('meetings:delete', id),
   retry: (id) => invoke('meetings:retry', id),
