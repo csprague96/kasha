@@ -4,6 +4,7 @@ import type { Meeting, Settings } from '@shared/types'
 import type { View } from '@/App'
 import { cn, dayGroup, hhmm } from '@/lib/utils'
 import { Button } from './ui/button'
+import { VersionLine } from './Updates'
 import { Wordmark } from './Wordmark'
 
 interface Props {
@@ -139,18 +140,21 @@ export function Sidebar({ meetings, view, settings, openActions, onSelect, onNew
         ))}
       </nav>
 
-      <div className="flex items-center justify-between gap-1">
-        <SyncLine meetings={meetings} settings={settings} onClick={() => onSelect({ kind: 'settings' })} />
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Settings"
-          title="Settings"
-          onClick={() => onSelect({ kind: 'settings' })}
-          className={cn(view.kind === 'settings' && 'bg-foreground/5')}
-        >
-          <SettingsIcon className="text-muted" />
-        </Button>
+      <div className="flex flex-col">
+        <div className="flex items-center justify-between gap-1">
+          <SyncLine meetings={meetings} settings={settings} onClick={() => onSelect({ kind: 'settings' })} />
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Settings"
+            title="Settings"
+            onClick={() => onSelect({ kind: 'settings' })}
+            className={cn(view.kind === 'settings' && 'bg-foreground/5')}
+          >
+            <SettingsIcon className="text-muted" />
+          </Button>
+        </div>
+        <VersionLine onOpenSettings={() => onSelect({ kind: 'settings' })} />
       </div>
     </aside>
   )

@@ -53,8 +53,9 @@ import { syncVoices } from './speakers'
 import { whisperPrompt } from './speech'
 import * as store from './store'
 import { splitNote } from './summarizer'
+import { Updater } from './updater'
 import * as voices from './voices'
-import { createBarWindow, createMainWindow, createToastWindow } from './windows'
+import { appIcon, createBarWindow, createMainWindow, createToastWindow } from './windows'
 
 // Dev and testing: keep data in a separate folder so real notes aren't touched.
 if (process.env.KASHA_DATA_DIR) app.setPath('userData', process.env.KASHA_DATA_DIR)
@@ -93,12 +94,21 @@ let recording: ActiveRecording | null = null
 
 const detector = new MeetingDetector(() => store.getSettings().detect)
 
+/** A recording or processing in progress: an update must wait for it. */
+const busy = () =>
+  !!recording || store.listMeetings().some((m) => m.status === 'transcribing' || m.status === 'separating' || m.status === 'summarizing')
+
+const updater = new Updater((status) => {
+  broadcast('update-status', status)
+  refreshTray()
+}, busy)
+
 const reminders = new ReminderScheduler(
   () => store.getSettings(),
   (lastShown) => store.setSettings({ reminders: { ...store.getSettings().reminders, lastShown } }),
   (text) => {
     if (!Notification.isSupported()) return
-    const n = new Notification({ title: 'Open actions', body: text, silent: true })
+    const n = new Notification({ title: 'Open actions', body: text, silent: true, icon: appIcon() })
     n.on('click', () => showMain({ actions: true }))
     n.show()
   }
@@ -245,6 +255,9 @@ function refreshTray(): void {
       { label: 'Actions', click: () => showMain({ actions: true }) },
       { label: 'Settings', click: () => showMain({ settings: true }) },
       { type: 'separator' },
+      ...(updater.current().state === 'ready'
+        ? [{ label: `Restart to update to ${updater.current().version}`, click: () => void updater.restart() }]
+        : []),
       { label: 'Quit Kasha', click: () => app.quit() }
     ])
   )
@@ -617,6 +630,11 @@ function registerIpc(): void {
     return r.canceled ? null : r.filePaths[0]
   })
 
+  handle('app:info', () => ({ version: app.getVersion(), installed: app.isPackaged }))
+  handle('update:status', () => updater.current())
+  handle('update:check', () => updater.check())
+  handle('update:install', () => updater.restart())
+
   ipcMain.on('win:openMeeting', (e, id: string) => isOwnWindow(e.sender) && showMain({ meetingId: id }))
 
   // Toast. In the recurring prompt, accept is "Always record" and dismiss is "Just this once".
@@ -706,6 +724,7 @@ app.on('window-all-closed', () => undefined)
 
 app.on('before-quit', () => {
   detector.stop()
+  updater.stop()
   if (recording) {
     // Close files cleanly so the audio can still be processed next time.
     const { meetingId, rec } = recording
@@ -750,6 +769,7 @@ app.whenReady().then(() => {
 
   registerIpc()
   applyLoginItem()
+  updater.start()
   tray = new Tray(trayIcon())
   tray.on('click', () => showMain())
   refreshTray()

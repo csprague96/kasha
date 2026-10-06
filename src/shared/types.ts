@@ -260,6 +260,24 @@ export interface ShareOptions {
   transcript: boolean
 }
 
+/** Kasha's own updates, from the GitHub releases of the repo. */
+export interface UpdateStatus {
+  /**
+   * dev: running from source, where updates are off. downloading: a newer
+   * version is on its way. ready: downloaded, waiting for a restart.
+   */
+  state: 'dev' | 'idle' | 'checking' | 'downloading' | 'ready' | 'error'
+  version: string | null
+  message: string | null
+  /** How much of the download is done, 0 to 100. */
+  percent?: number
+}
+
+export interface AppInfo {
+  version: string
+  installed: boolean
+}
+
 export interface ReplaceOptions {
   matchCase: boolean
   notes: boolean // also replace in the note

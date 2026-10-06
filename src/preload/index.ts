@@ -46,6 +46,11 @@ const kasha: KashaApi = {
   listVoices: () => invoke('voices:list'),
   removeVoice: (name) => invoke('voices:remove', name),
 
+  appInfo: () => invoke('app:info'),
+  updateStatus: () => invoke('update:status'),
+  checkForUpdates: () => invoke('update:check'),
+  installUpdate: () => invoke('update:install'),
+
   openMeeting: (id) => ipcRenderer.send('win:openMeeting', id),
 
   onMeetingsChanged: (cb) => on('meetings-changed', cb),
@@ -56,7 +61,8 @@ const kasha: KashaApi = {
   onRecordingChanged: (cb) => on('recording-changed', cb),
   onProgress: (cb) => on('progress', cb),
   onTranscriptLive: (cb) => on('transcript-live', cb),
-  onSettingsChanged: (cb) => on('settings-changed', cb)
+  onSettingsChanged: (cb) => on('settings-changed', cb),
+  onUpdateStatus: (cb) => on('update-status', cb)
 }
 
 const toast: ToastApi = {

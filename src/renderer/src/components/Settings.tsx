@@ -13,6 +13,7 @@ import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Switch } from './ui/switch'
+import { UpdateControls } from './Updates'
 
 interface Props {
   settings: SettingsT
@@ -521,6 +522,7 @@ export function Settings({ settings, onChange }: Props) {
           checked={settings.launchAtLogin}
           onChange={(v) => onChange({ launchAtLogin: v })}
         />
+        <UpdateControls />
       </Section>
     </div>
   )

@@ -1,5 +1,6 @@
 import type {
   ActionGroup,
+  AppInfo,
   CalendarMatch,
   LiveState,
   Meeting,
@@ -11,6 +12,7 @@ import type {
   ShareOptions,
   ToastState,
   TranscriptSegment,
+  UpdateStatus,
   VoiceProfile
 } from './types'
 
@@ -62,6 +64,13 @@ export interface KashaApi {
   listVoices(): Promise<VoiceProfile[]>
   removeVoice(name: string): Promise<void>
 
+  // The app itself
+  appInfo(): Promise<AppInfo>
+  updateStatus(): Promise<UpdateStatus>
+  checkForUpdates(): Promise<UpdateStatus>
+  /** Installs a downloaded update and restarts. False when Kasha is busy with a recording. */
+  installUpdate(): Promise<boolean>
+
   // Window
   openMeeting(id: string): void
 
@@ -76,6 +85,7 @@ export interface KashaApi {
   /** New lines from live transcription during a call. */
   onTranscriptLive(cb: (id: string, segments: TranscriptSegment[]) => void): () => void
   onSettingsChanged(cb: (s: Settings) => void): () => void
+  onUpdateStatus(cb: (s: UpdateStatus) => void): () => void
 }
 
 /** Toast window surface. */
