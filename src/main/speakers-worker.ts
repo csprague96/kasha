@@ -55,10 +55,10 @@ const BLOCK = 15 * 60 // seconds of speech analysed at once
 const CLUSTER_THRESHOLD = 0.5 // pyannote's grouping; only its turn boundaries are used
 const WINDOW = 2.5 // seconds of speech per voiceprint; long turns can hide a change of speaker
 const MIN_WINDOW = 1.0 // shorter turns are too short for a voiceprint; they follow the nearest window
-const CUT = 0.35 // windows grouped while their average similarity is at least this
+const CUT = 0.3 // windows grouped while their average similarity is at least this
 // With an expected head count, a stricter cut is tried when fewer voices than
 // that appear. Beyond 0.45 the voiceprints shatter into fragments.
-const CUTS = [CUT, 0.45]
+const CUTS = [CUT, 0.4]
 const SUBSTANTIAL = 20 // seconds of speech for a group to count as a person
 const SAME = 0.7 // groups this alike are one person even when more are expected
 const MERGE = 0.4 // clusters at least this similar are the same person; split pieces of one voice rejoin here
