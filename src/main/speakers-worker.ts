@@ -36,9 +36,13 @@ const RATE = 16000
 const PAD = 0.25 // audio kept either side of a speech span
 const GAP = 0.5 // silence between spans in the analysed audio
 const BLOCK = 15 * 60 // seconds of speech analysed at once
-const CLUSTER_THRESHOLD = 0.9 // pyannote clustering: higher = fewer speakers; tuned on samples
-const MERGE = 0.7 // clusters at least this similar are the same person
-const TINY = 4 // clusters with less speech than this join their nearest voice
+// Clustering joins voices closer than this cosine distance (1 - similarity).
+// 0.9 joined anything more than 0.1 alike, and merged different people on a
+// real Teams call, who scored 0.19 to 0.30 alike. 0.5 is sherpa-onnx's default.
+const CLUSTER_THRESHOLD = 0.5
+const MERGE = 0.5 // clusters at least this similar are the same person; split pieces of one voice rejoin here
+const TINY = 4 // clusters with less speech than this join their nearest voice…
+const TINY_MATCH = 0.35 // …if it sounds at least this alike. Otherwise they're someone who said little.
 const EMBED_SECONDS = 60 // audio per cluster used for its embedding
 
 interface Piece {
@@ -152,12 +156,14 @@ function consolidate(clusters: SpeakerCluster[]): SpeakerCluster[] {
   // Tiny clusters are usually a few words of someone already found.
   const big = list.filter((c) => c.seconds >= TINY)
   if (big.length && big.length < list.length) {
+    const kept: SpeakerCluster[] = []
     for (const small of list.filter((c) => c.seconds < TINY)) {
       let k = 0
       for (let i = 1; i < big.length; i++) if (cosine(small.embedding, big[i].embedding) > cosine(small.embedding, big[k].embedding)) k = i
-      big[k] = join(big[k], small)
+      if (cosine(small.embedding, big[k].embedding) >= TINY_MATCH) big[k] = join(big[k], small)
+      else kept.push(small)
     }
-    list = big
+    list = [...big, ...kept]
   }
   return list.sort((a, b) => a.segments[0].start - b.segments[0].start)
 }
