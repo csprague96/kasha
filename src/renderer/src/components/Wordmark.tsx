@@ -28,13 +28,17 @@ function Stitch({ size = 20 }: { size?: number }) {
   )
 }
 
+/** How long the K chews before "Каша" comes back out. Matches the keyframes in styles.css. */
+const FULL_MS = 2600
+
 /**
- * Hovering the name reads it in Cyrillic, and a small "enjoy your meal"
- * appears for a moment. Kasha is porridge.
+ * Hover the name and the K eats it: "Kasha" slides into the K's jaws,
+ * "смачного" (enjoy your meal) follows it in, and "Каша" comes back out.
+ * Kasha is porridge.
  */
 export function Wordmark() {
   const [over, setOver] = useState(false)
-  const [pop, setPop] = useState(false)
+  const [fed, setFed] = useState(false) // the K has finished chewing
   const timer = useRef<number | undefined>(undefined)
 
   useEffect(() => () => window.clearTimeout(timer.current), [])
@@ -42,34 +46,45 @@ export function Wordmark() {
   const enter = () => {
     window.clearTimeout(timer.current)
     setOver(true)
-    setPop(true)
-    timer.current = window.setTimeout(() => setPop(false), 2200)
+    setFed(false)
+    timer.current = window.setTimeout(() => setFed(true), FULL_MS)
+  }
+  const leave = () => {
+    window.clearTimeout(timer.current)
+    setOver(false)
+    setFed(false)
   }
 
   return (
-    <div
-      className="relative flex w-max cursor-default items-center gap-2 px-2 text-base font-semibold"
-      onMouseEnter={enter}
-      onMouseLeave={() => setOver(false)}
-    >
-      <Logo animate={over} />
-      <span
-        lang={over ? 'uk' : undefined}
-        style={{ display: 'inline-block', animation: over ? 'kasha-lift .9s .4s cubic-bezier(.34,1.56,.64,1) both' : 'none' }}
-      >
-        {over ? 'Каша' : 'Kasha'}
+    <div className="flex w-max cursor-default items-center gap-2 px-2 text-base font-semibold" onMouseEnter={enter} onMouseLeave={leave}>
+      <Logo animate={over && !fed} />
+      {/* The name's own width holds the space; what shows slides over it, clipped at the K's mouth. */}
+      <span className="relative inline-block" style={{ clipPath: 'inset(-8px -200px -8px 0)' }} aria-label="Kasha">
+        <span className="invisible">Kasha</span>
+        {!over && <span className="absolute inset-0">Kasha</span>}
+        {over && !fed && (
+          <>
+            <span className="absolute inset-0" style={{ animation: 'kasha-eaten 1.3s cubic-bezier(.4,0,.8,.4) both' }}>
+              Kasha
+            </span>
+            <span
+              aria-hidden="true"
+              className="absolute inset-y-0 left-0 flex items-center gap-1.5 whitespace-nowrap"
+              style={{ animation: 'kasha-eaten-next 1.5s .9s cubic-bezier(.4,0,.8,.4) both' }}
+            >
+              <Stitch size={14} />
+              <span lang="uk" className="kasha-gradient-text font-mono text-xs font-semibold">
+                смачного
+              </span>
+            </span>
+          </>
+        )}
+        {over && fed && (
+          <span lang="uk" className="absolute inset-0" style={{ animation: 'kasha-burp .6s cubic-bezier(.34,1.56,.64,1) both' }}>
+            Каша
+          </span>
+        )}
       </span>
-      {/* Sits to the right of the name, where the sidebar has room. */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute top-1/2 left-full z-10 ml-3 flex items-center gap-1.5 whitespace-nowrap transition-[opacity,transform] duration-200"
-        style={{ opacity: pop ? 1 : 0, transform: pop ? 'translate(0, -50%)' : 'translate(-4px, -50%)' }}
-      >
-        <Stitch size={16} />
-        <span lang="uk" className="kasha-gradient-text font-mono text-xs font-semibold">
-          смачного
-        </span>
-      </div>
     </div>
   )
 }
