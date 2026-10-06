@@ -47,6 +47,10 @@ const kasha: KashaApi = {
   pickFolder: () => invoke('setup:pickFolder'),
   checkCalendar: () => invoke('calendar:check'),
 
+  listTags: () => invoke('tags:list'),
+  renameTag: (from, to) => invoke('tags:rename', from, to),
+  removeTag: (tag) => invoke('tags:remove', tag),
+
   listVoices: () => invoke('voices:list'),
   removeVoice: (name) => invoke('voices:remove', name),
 

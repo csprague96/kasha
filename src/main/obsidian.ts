@@ -4,6 +4,11 @@ import { attendance, attendanceSummary } from '@shared/attendance'
 import { APP_LABELS, speakerName, type Meeting, type Settings, type TranscriptSegment } from '@shared/types'
 import { paths } from './store'
 
+/** The Obsidian settings plus the standing tags every note gets. */
+export type ExportOptions = Settings['obsidian'] & { defaultTags?: string[] }
+
+export const exportOptions = (s: Settings): ExportOptions => ({ ...s.obsidian, defaultTags: s.tags.defaults })
+
 const p2 = (n: number) => String(n).padStart(2, '0')
 
 function safeName(s: string): string {
@@ -34,7 +39,7 @@ export function buildMarkdown(
   m: Meeting,
   note: string,
   transcript: TranscriptSegment[],
-  opts: Settings['obsidian'],
+  opts: ExportOptions,
   imageName: (rel: string) => string | null
 ): string {
   const d = new Date(m.recordingStartedAt ?? m.createdAt)
@@ -52,7 +57,9 @@ export function buildMarkdown(
   const who = attendanceSummary(attendance(m, transcript, ''))
   if (who.present.length) fm.push(`attendees: [${who.present.map(yamlString).join(', ')}]`)
   if (who.absent.length) fm.push(`not_heard: [${who.absent.map(yamlString).join(', ')}]`)
-  fm.push(`tags: [${m.tags.map(yamlString).join(', ')}]`, 'source: kasha', '---', '')
+  // The standing tags from Settings go first, then the note's own.
+  const tags = Array.from(new Set([...(opts.defaultTags ?? []), ...m.tags]))
+  fm.push(`tags: [${tags.map(yamlString).join(', ')}]`, 'source: kasha', '---', '')
 
   // Local image links become Obsidian embeds, or are dropped if attachments are off.
   const body = note.replace(/!\[[^\]]*\]\((attachments\/[^)\s]+)\)/g, (_all, rel: string) => {
@@ -76,7 +83,7 @@ export function syncToObsidian(
   m: Meeting,
   note: string,
   transcript: TranscriptSegment[],
-  opts: Settings['obsidian'],
+  opts: ExportOptions,
   force = false
 ): SyncResult {
   if (!opts.vault) return { state: 'not-synced' }

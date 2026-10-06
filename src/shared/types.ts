@@ -157,6 +157,12 @@ export interface Settings {
     recognize: boolean
   }
   vocabulary: VocabularyEntry[]
+  tags: {
+    /** Added to every note's tags in Obsidian, e.g. "meeting". */
+    defaults: string[]
+    /** Let the summary add one to three topic tags to each note. */
+    fromSummary: boolean
+  }
   reminders: {
     enabled: boolean
     time: string // HH:MM, weekdays
@@ -203,6 +209,7 @@ export const DEFAULT_SETTINGS: Settings = {
   liveTranscription: true,
   speakers: { separate: true, recognize: true },
   vocabulary: [],
+  tags: { defaults: [], fromSummary: true },
   reminders: { enabled: true, time: '09:00' },
   detect: { teams: true, slack: true, ringcentral: true, zoom: true, browser: false },
   recording: { mode: 'ask', meetings: [], declined: [], people: [], never: [], lookupAttendees: true, pauseWhenLowMemory: true },
@@ -317,6 +324,24 @@ export interface UpdateStatus {
   /** How much of the download is done, 0 to 100. */
   percent?: number
 }
+
+/** A tag and how many notes carry it. */
+export interface TagCount {
+  tag: string
+  count: number
+}
+
+/** Tags are lowercase, with hyphens for spaces and no leading "#", as Obsidian likes them. */
+export const normTag = (t: string): string =>
+  t
+    .trim()
+    .toLowerCase()
+    .replace(/^#+/, '')
+    .replace(/\s+/g, '-')
+    .replace(/[^\p{L}\p{N}\-_/]/gu, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
 
 /** The recording still on disk for a meeting, and when Kasha will delete it. */
 export interface AudioInfo {

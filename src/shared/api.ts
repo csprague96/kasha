@@ -11,6 +11,7 @@ import type {
   SetupStatus,
   Settings,
   ShareOptions,
+  TagCount,
   ToastState,
   TranscriptSegment,
   UpdateStatus,
@@ -67,6 +68,12 @@ export interface KashaApi {
   pickFolder(): Promise<string | null>
   /** Looks for the meeting happening now in Outlook, to check the calendar lookup works. */
   checkCalendar(): Promise<CalendarMatch | null>
+
+  // Tags across all notes
+  listTags(): Promise<TagCount[]>
+  /** Renames a tag in every note (merging into `to` where it already exists) and re-syncs those notes. */
+  renameTag(from: string, to: string): Promise<void>
+  removeTag(tag: string): Promise<void>
 
   // Voices learned from named speakers
   listVoices(): Promise<VoiceProfile[]>

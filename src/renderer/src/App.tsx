@@ -82,6 +82,7 @@ export function App() {
   }
 
   const current = view.kind === 'note' ? meetings.find((m) => m.id === view.id) : undefined
+  const allTags = Array.from(new Set(meetings.flatMap((m) => m.tags))).sort()
   const openMine = actions.reduce((n, g) => n + g.items.filter((i) => i.mine && !i.done).length, 0)
 
   const toggleAction = (item: ActionItem, done: boolean) => {
@@ -122,6 +123,7 @@ export function App() {
             recording={recording}
             progress={progress[current.id]}
             settings={settings}
+            allTags={allTags}
           />
         )}
         {view.kind !== 'settings' && view.kind !== 'actions' && !current && (

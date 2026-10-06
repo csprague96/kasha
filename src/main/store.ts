@@ -41,6 +41,7 @@ export function getSettings(): Settings {
       detect: { ...DEFAULT_SETTINGS.detect, ...saved.detect },
       recording: { ...DEFAULT_SETTINGS.recording, ...saved.recording },
       speakers: { ...DEFAULT_SETTINGS.speakers, ...saved.speakers },
+      tags: { ...DEFAULT_SETTINGS.tags, ...saved.tags },
       obsidian: { ...DEFAULT_SETTINGS.obsidian, ...saved.obsidian }
     }
   }
@@ -56,6 +57,7 @@ export function setSettings(patch: Partial<Settings>): Settings {
     detect: { ...cur.detect, ...patch.detect },
     recording: { ...cur.recording, ...patch.recording },
     speakers: { ...cur.speakers, ...patch.speakers },
+    tags: { ...cur.tags, ...patch.tags },
     obsidian: { ...cur.obsidian, ...patch.obsidian }
   }
   mkdirSync(paths.root(), { recursive: true })

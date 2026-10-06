@@ -24,6 +24,7 @@ import {
   GENERIC_TITLE,
   isSpeakerId,
   normName,
+  normTag,
   type CalendarMatch,
   type DetectedMeeting,
   type LiveState,
@@ -43,7 +44,7 @@ import { lookupMeeting } from './calendar'
 import { log } from './log'
 import { MeetingDetector } from './detector'
 import { getLive, startLive, takeLive, type LiveTranscriber } from './live'
-import { exportFileName, syncToObsidian } from './obsidian'
+import { exportFileName, exportOptions, syncToObsidian } from './obsidian'
 import { cleanText, enqueue, type PipelineEvents } from './pipeline'
 import { Recording, type Track } from './recorder'
 import { takeScreenshot } from './screenshot'
@@ -501,7 +502,7 @@ function registerIpc(): void {
     const before = store.getMeeting(id)
     const clean: Partial<Meeting> = {}
     if (typeof patch.title === 'string') clean.title = patch.title.trim().slice(0, 200) || 'Untitled'
-    if (Array.isArray(patch.tags)) clean.tags = patch.tags.map(String).slice(0, 20)
+    if (Array.isArray(patch.tags)) clean.tags = Array.from(new Set(patch.tags.map((t) => normTag(String(t))).filter(Boolean))).slice(0, 20)
     if (patch.speakers && typeof patch.speakers === 'object') {
       const names: NonNullable<Meeting['speakers']> = {}
       for (const [k, v] of Object.entries(patch.speakers)) {
@@ -610,7 +611,7 @@ function registerIpc(): void {
   handle('meetings:sync', (id: string) => {
     const m = store.getMeeting(id)
     if (!m) return
-    const sync = syncToObsidian(m, store.readNote(id), store.readTranscript(id), store.getSettings().obsidian, true)
+    const sync = syncToObsidian(m, store.readNote(id), store.readTranscript(id), exportOptions(store.getSettings()), true)
     store.updateMeeting(id, { sync })
     broadcast('meetings-changed')
   })
@@ -658,6 +659,32 @@ function registerIpc(): void {
   handle('setup:downloadWhisper', () =>
     downloadSpeech(async () => broadcast('setup-changed', await setupStatus()))
   )
+
+  handle('tags:list', () => {
+    const counts = new Map<string, number>()
+    for (const m of store.listMeetings()) for (const t of m.tags) counts.set(t, (counts.get(t) ?? 0) + 1)
+    return Array.from(counts, ([tag, count]) => ({ tag, count })).sort((a, b) => a.tag.localeCompare(b.tag))
+  })
+  // Renaming or removing a tag touches every note that has it. Synced notes
+  // are written to Obsidian again, unless they were edited there.
+  const retag = (fn: (tags: string[]) => string[]) => {
+    const settings = store.getSettings()
+    for (const m of store.listMeetings()) {
+      const tags = Array.from(new Set(fn(m.tags)))
+      if (tags.length === m.tags.length && tags.every((t, i) => t === m.tags[i])) continue
+      let next = store.updateMeeting(m.id, { tags })
+      if (next.sync.state === 'synced' && settings.obsidian.vault) {
+        next = store.updateMeeting(m.id, { sync: syncToObsidian(next, store.readNote(m.id), store.readTranscript(m.id), exportOptions(settings)) })
+      }
+    }
+    broadcast('meetings-changed')
+  }
+  handle('tags:rename', (from: string, to: string) => {
+    const target = normTag(String(to))
+    if (!target || target === from) return
+    retag((tags) => tags.map((t) => (t === from ? target : t)))
+  })
+  handle('tags:remove', (tag: string) => retag((tags) => tags.filter((t) => t !== tag)))
 
   handle('voices:list', () => voices.list())
   handle('voices:remove', (name: string) => voices.remove(String(name)))

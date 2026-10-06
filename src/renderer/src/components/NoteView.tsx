@@ -1,6 +1,6 @@
 import { Download, ExternalLink, Loader2, RefreshCw, Trash2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import type { AudioInfo, Meeting, RecordingInfo, Settings, TranscriptSegment } from '@shared/types'
+import { normTag, type AudioInfo, type Meeting, type RecordingInfo, type Settings, type TranscriptSegment } from '@shared/types'
 import { cn, hhmm, meetingMeta, timer } from '@/lib/utils'
 import { Attendees } from './Attendees'
 import { CorrectWord, type WordAt } from './CorrectWord'
@@ -14,6 +14,8 @@ interface Props {
   recording: RecordingInfo | null
   progress?: number
   settings: Settings
+  /** Tags on any note, for suggestions. */
+  allTags: string[]
 }
 
 type Tab = 'notes' | 'transcript' | 'attendees'
@@ -196,14 +198,16 @@ function AudioNotice({ meeting, audio, onChanged }: { meeting: Meeting; audio: A
   )
 }
 
-function Tags({ meeting }: { meeting: Meeting }) {
+function Tags({ meeting, allTags }: { meeting: Meeting; allTags: string[] }) {
   const [draft, setDraft] = useState('')
   const save = (tags: string[]) => void window.kasha.updateMeeting(meeting.id, { tags })
   const add = () => {
-    const t = draft.trim().toLowerCase().replace(/^#/, '').replace(/\s+/g, '-')
+    const t = normTag(draft)
     if (t && !meeting.tags.includes(t)) save([...meeting.tags, t])
     setDraft('')
   }
+  // Tags already used on other notes, offered as the user types.
+  const suggestions = allTags.filter((t) => !meeting.tags.includes(t))
   return (
     <div className="flex flex-wrap items-center gap-2">
       {meeting.tags.map((t) => (
@@ -218,8 +222,16 @@ function Tags({ meeting }: { meeting: Meeting }) {
           </button>
         </span>
       ))}
+      {suggestions.length > 0 && (
+        <datalist id={`tags-${meeting.id}`}>
+          {suggestions.map((t) => (
+            <option key={t} value={t} />
+          ))}
+        </datalist>
+      )}
       <input
         value={draft}
+        list={suggestions.length ? `tags-${meeting.id}` : undefined}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => e.key === 'Enter' && add()}
         onBlur={add}
@@ -342,7 +354,7 @@ export function NoteView(props: Props) {
                 }}
               />
             )}
-            <Tags meeting={meeting} />
+            <Tags meeting={meeting} allTags={props.allTags} />
           </div>
         )}
         {data && tab === 'transcript' && (

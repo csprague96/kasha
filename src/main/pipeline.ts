@@ -4,7 +4,7 @@ import { applyVocabulary } from '@shared/text'
 import { GENERIC_TITLE, type Meeting } from '@shared/types'
 import { takeLive } from './live'
 import { log } from './log'
-import { syncToObsidian } from './obsidian'
+import { exportOptions, syncToObsidian } from './obsidian'
 import type { Track } from './recorder'
 import { redact } from './redact'
 import { speakersReady } from './setup'
@@ -121,7 +121,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
         summaryEngine: s.engine,
         summaryOutdated: false,
         title: s.title && GENERIC_TITLE.test(meeting.title) ? s.title : meeting.title,
-        tags: Array.from(new Set([...meeting.tags, ...s.tags]))
+        tags: Array.from(new Set([...meeting.tags, ...(store.getSettings().tags.fromSummary ? s.tags : [])]))
       })
     }
 
@@ -129,7 +129,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
     const settings = store.getSettings()
     if (settings.obsidian.syncOnEnd && settings.obsidian.vault) {
       meeting = set({
-        sync: syncToObsidian(meeting, store.readNote(id), transcript, settings.obsidian)
+        sync: syncToObsidian(meeting, store.readNote(id), transcript, exportOptions(settings))
       })
     }
     if (!settings.keepAudio) rmSync(join(store.paths.meeting(id), 'audio'), { recursive: true, force: true })

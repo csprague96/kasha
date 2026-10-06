@@ -3,8 +3,10 @@ import { useEffect, useState, type ReactNode } from 'react'
 import {
   APP_LABELS,
   normName,
+  normTag,
   SPEECH_MODELS,
   type CalendarMatch,
+  type TagCount,
   type SetupStatus,
   type Settings as SettingsT,
   type SpeechModelId,
@@ -267,6 +269,41 @@ const MODES: Array<{ value: SettingsT['recording']['mode']; label: string; hint:
   { value: 'rules', label: 'Only the meetings and people under Always record', hint: 'No prompt for anything else. Start other recordings yourself from New note.' }
 ]
 
+/** Every tag in use, with a count; rename one everywhere or drop it. */
+function TagList() {
+  const [tags, setTags] = useState<TagCount[] | null>(null)
+  const refresh = () => void window.kasha.listTags().then(setTags)
+  useEffect(() => {
+    refresh()
+    return window.kasha.onMeetingsChanged(refresh)
+  }, [])
+  if (!tags) return null
+  if (!tags.length) return <p className="text-[13px] text-muted">No tags on any note yet. The summary adds topic tags, and you can add your own under a note.</p>
+  return (
+    <div className="flex flex-col divide-y divide-border rounded-md border border-border bg-surface">
+      {tags.map((t) => (
+        <div key={t.tag} className="grid grid-cols-[1fr_auto_auto] items-center gap-2 px-2 py-1">
+          <LazyInput
+            aria-label={`Rename tag ${t.tag}`}
+            className="h-8 border-transparent bg-transparent px-1.5 text-[13px] hover:border-border"
+            value={`#${t.tag}`}
+            onCommit={(v) => {
+              const to = normTag(v)
+              if (to && to !== t.tag) void window.kasha.renameTag(t.tag, to).then(refresh)
+            }}
+          />
+          <span className="tabular text-xs text-muted">
+            {t.count} {t.count === 1 ? 'note' : 'notes'}
+          </span>
+          <Button variant="ghost" size="icon" aria-label={`Remove tag ${t.tag} from every note`} title="Remove from every note" onClick={() => void window.kasha.removeTag(t.tag).then(refresh)}>
+            <X className="size-3.5 text-muted" />
+          </Button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 /** Runs the Outlook lookup once, so the user can see whether it works for them. */
 function CalendarCheck() {
   const [state, setState] = useState<'idle' | 'checking' | { match: CalendarMatch | null }>('idle')
@@ -443,6 +480,26 @@ export function Settings({ settings, onChange }: Props) {
           <pre className="m-0 rounded-md border border-border bg-surface p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-muted">
             {preview(settings)}
           </pre>
+        </Field>
+      </Section>
+
+      <Section title="Tags">
+        <Field group label="On every note" hint="Added to the tags of every note Kasha writes to Obsidian, so they're easy to find there.">
+          <NameList
+            items={settings.tags.defaults}
+            onChange={(defaults) => void onChange({ tags: { ...settings.tags, defaults: defaults.map(normTag).filter(Boolean) } })}
+            placeholder="Tag, e.g. meeting"
+            label="New standing tag"
+          />
+        </Field>
+        <Toggle
+          label="Let the summary add topic tags"
+          hint="One to three lowercase tags per note, from what was discussed. Off, notes only get the tags you add."
+          checked={settings.tags.fromSummary}
+          onChange={(v) => onChange({ tags: { ...settings.tags, fromSummary: v } })}
+        />
+        <Field group label="In use" hint="Rename a tag to change it on every note (two tags with the same name merge). Synced notes are written to Obsidian again.">
+          <TagList />
         </Field>
       </Section>
 
