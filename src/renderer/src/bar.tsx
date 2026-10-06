@@ -1,7 +1,7 @@
-import { Camera, PenLine } from 'lucide-react'
+import { Camera, Pause, PenLine, Play } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import type { RecordingInfo } from '@shared/types'
+import type { LiveState, RecordingInfo } from '@shared/types'
 import { cn, timer } from './lib/utils'
 import './styles.css'
 
@@ -95,10 +95,13 @@ function Bar() {
   const [text, setText] = useState('')
   const [flash, setFlash] = useState<string | null>(null)
   const [snipping, setSnipping] = useState(false)
+  const [live, setLive] = useState<LiveState | null>(null)
   const capture = useRef<Promise<Capture> | null>(null)
 
   useEffect(() => {
     void window.bar.info().then(setInfo)
+    void window.bar.live().then(setLive)
+    const offLive = window.bar.onLiveState(setLive)
     capture.current = startCapture()
     const t = window.setInterval(() => setNow(Date.now()), 1000)
     const off = window.bar.onStopRequested(async () => {
@@ -111,6 +114,7 @@ function Bar() {
     return () => {
       window.clearInterval(t)
       off()
+      offLive()
     }
   }, [])
 
@@ -144,6 +148,13 @@ function Bar() {
 
   if (!info) return null
   const pill = 'rounded-full border border-border px-2.5 py-1 font-medium [-webkit-app-region:no-drag]'
+  const paused = live?.paused ?? null
+  const pauseLabel =
+    paused === 'user'
+      ? 'Resume transcribing'
+      : paused === 'memory'
+        ? 'Transcribing is waiting for free memory. Select to pause it until you resume.'
+        : 'Pause transcribing. Recording carries on; the transcript catches up later.'
 
   return (
     <div className="flex h-full items-center p-1">
@@ -172,6 +183,19 @@ function Bar() {
             className={cn('min-w-0 flex-1 truncate text-left [-webkit-app-region:no-drag]', flash && 'text-muted')}
           >
             {flash ?? info.title}
+            {!flash && paused && <span className="text-muted"> · transcribing paused</span>}
+          </button>
+        )}
+
+        {live?.available && (
+          <button
+            className={cn(pill, 'inline-flex items-center px-1.5 hover:bg-sidebar', paused && 'border-foreground')}
+            onClick={() => window.bar.setPaused(paused !== 'user')}
+            title={pauseLabel}
+            aria-label={pauseLabel}
+            aria-pressed={paused === 'user'}
+          >
+            {paused === 'user' ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
           </button>
         )}
 

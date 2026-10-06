@@ -34,6 +34,7 @@ export function App() {
     refreshActions()
     const offs = [
       window.kasha.onMeetingsChanged(refresh),
+      window.kasha.onSettingsChanged(setSettings),
       window.kasha.onActionsChanged(refreshActions),
       window.kasha.onRecordingChanged((r) => {
         setRecording(r)

@@ -17,7 +17,7 @@ interface Props {
 
 function StatusIcon({ m }: { m: Meeting }) {
   if (m.status === 'recording') return <span className="size-2 shrink-0 rounded-full bg-record" aria-label="Recording" />
-  if (m.status === 'transcribing' || m.status === 'summarizing')
+  if (m.status === 'transcribing' || m.status === 'separating' || m.status === 'summarizing')
     return <Loader2 className="size-3.5 shrink-0 animate-spin text-muted" aria-label="Processing" />
   if (m.status === 'failed') return <AlertCircle className="size-3.5 shrink-0 text-destructive" aria-label="Failed" />
   return null

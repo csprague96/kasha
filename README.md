@@ -5,21 +5,32 @@ Meeting notes for Windows. Kasha notices when a Teams, Slack, RingCentral or Zoo
 ## Using it
 
 1. Install and open Kasha. Setup has three items:
-   - **Speech model**: a one-time 200 MB download. Transcription runs on your PC, so audio never leaves it.
-   - **Claude Code**: writes the summary using your existing Claude sign-in. Install Claude Code and run `claude` once to sign in. No API key is needed. Without it, you still get transcripts.
+   - **Speech models**: a one-time 400 MB download. Transcription and speaker separation run on your PC, so audio never leaves it.
+   - **Summaries**: written by Claude Code or Codex using your existing sign-in, so no API key is needed. Sign in once with `claude` or `codex login`. **Automatic** (the default) uses Claude Code when it's signed in, otherwise Codex; you can pick one in Settings. Without either, you still get transcripts.
    - **Obsidian vault**: optional. Notes go to `Meetings/` in the vault.
 2. Join a call as usual. When **Meeting detected** appears, select **Start transcribing**.
 3. A bar stays at the top of the screen during the call:
    - **Note** adds a timestamped line to the note.
    - **Screenshot** opens the Windows snipping overlay; the image is added to the note.
    - **Stop** ends the recording. Kasha also stops on its own about 20 seconds after the call app releases the mic.
-4. After the call, Kasha transcribes and summarizes in the background. The note gets Summary, Decisions and Actions sections above your own notes, and then syncs to Obsidian.
+4. Kasha transcribes during the call, a minute or so behind, so the **Transcript** tab fills in as you talk. When the call ends it finishes the last few seconds and summarizes in the background. The note gets Summary, Decisions and Actions sections above your own notes, and then syncs to Obsidian.
 
 ### Actions
 
 **Actions** in the sidebar lists open checkboxes from every note, grouped by meeting. Your own come first and everyone else's are listed under **Others**, so you can follow up on them. Ticking an item updates the note and the Obsidian copy. Items ticked in Obsidian show as done in Kasha. Set **Your name** in Settings so actions assigned to you by name count as yours. On weekdays at 09:00 (configurable), a notification lists how many of your actions are open, due today or overdue.
 
 Due dates are stored in the note as `(due 2026-10-06)`. Shared copies show them as "due Tue 6 Oct".
+
+### Transcript
+
+- **Speakers**: after the call, the people on the computer's audio are told apart as **Speaker 1**, **Speaker 2** and so on (your mic is always **You**). Select a name at the top of the transcript to rename it everywhere. Select the name on a line to move that line to someone else, or to **Someone else** for a new speaker. The summary uses the names after you select **Update summary**.
+- **Recognising people**: when you name a speaker, Kasha keeps that voice (a short list of numbers, not audio) in `voices.json` on your PC. Next time the same person is on a call, the name is filled in. Settings lists the learned voices and lets you forget one; turn **Recognise people from past meetings** off to stop learning. Kasha never looks up attendees in your calendar.
+- **Edit**: select a line to fix it. Enter saves and Esc cancels.
+- **Find and replace** (Ctrl+H): replaces whole words in the transcript and, optionally, the note. **Fix in future meetings too** adds the correction to **Names and terms**.
+
+### Names and terms
+
+In Settings, list people's names and product terms, with what the speech model tends to hear instead (for example **RCVR**, heard as "Recover"). Kasha replaces the misheard forms in every new transcript (and, on the older Whisper model, also gives the list to it as spelling hints). Replacement is whole-word and ignores case, so "recover" the verb is changed too. Leave the "heard as" part out for words that are only ever the name.
 
 ### Share
 
@@ -34,25 +45,28 @@ Tell people on the call when you're transcribing.
 | Part | Approach |
 |---|---|
 | Meeting detection | Polls the Windows mic-usage registry (`CapabilityAccessManager\ConsentStore\microphone`) every 3 s. Names the meeting from the call app's window title. |
-| Audio | Mic and system audio (WASAPI loopback) are recorded as separate 16 kHz WAV tracks. In the transcript, the mic track is labelled **You** and the system audio **Others**. |
-| Transcription | [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `small.en` (5-bit quantized) with Silero voice activity detection, so silence is skipped. It runs as a low-priority process after the call ends, then exits. Peak RAM is about 620 MB. |
-| Summary | `claude -p` with no tools, no MCP and no project settings, using structured JSON output. Only transcript text is sent. |
+| Audio | Mic and system audio (WASAPI loopback) are recorded as separate 16 kHz WAV tracks. In the transcript, the mic track is labelled **You** and the system audio **Others**, until you name them. |
+| Transcription | NVIDIA **Parakeet TDT 0.6B v3** (4-bit), run by `parakeet-cli` from [whisper.cpp](https://github.com/ggml-org/whisper.cpp). Silero voice activity detection finds the speech in each track, which is packed into ~28-second chunks with short silences between the pieces. Parakeet's own word timings map every word back to when it was said, so lines from both tracks interleave in the right order. During a call a chunk is transcribed once about 20 seconds of speech has built up, on 4 threads at below-normal priority. One process runs at a time; a 28 s chunk takes about 4.6 s on a Core Ultra 7, peaks around 540 MB and exits (Whisper `small.en` took 18 s and 580 MB for the same chunk). With **Transcribe during the call** off, and on Retry, the same chunks run after the call on up to 6 threads. PCs that only have the older Whisper model keep using it until the new download runs. |
+| Speakers | After the call, the system-audio track is split by voice with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx): pyannote segmentation 3.0 plus 3D-Speaker CAM++ embeddings, run in a separate process (`speakers-worker.js`) that exits when done (about 350 MB while running, roughly 0.15x real time of the speech on 4 threads). Only the stretches with speech are analysed. Clusters closer than 0.7 cosine are merged and tiny ones folded in. Each speaker's embedding is saved in `speakers.json` beside the transcript; naming a speaker files that embedding under the name in `voices.json`, and later meetings name a voice that matches at 0.7 or above. |
+| Summary | `claude -p` with no tools, no MCP and no project settings, or `codex exec` read-only with its shell tool and MCP servers off. Both use structured JSON output, and only transcript text is sent. If Claude Code isn't signed in, Automatic falls back to Codex. |
 | Obsidian | Writes `{date} {title}.md` with YAML front matter; screenshots go to `attachments/`. A note that was edited in Obsidian since the last sync is not overwritten. |
 | Storage | `%APPDATA%\Kasha\meetings\<id>\`: `meta.json`, `note.md`, `transcript.json`, `attachments/`. By default, audio is deleted after transcription. |
 
 ### Compliance
 
 - Card numbers (Luhn-checked, 13–19 digits) and SSNs are replaced with `[card number]` / `[SSN]` before the transcript is saved or sent to Claude.
-- The summary prompt tells Claude never to include card numbers, account numbers, SSNs or passwords.
+- The summary prompt tells the model never to include card numbers, account numbers, SSNs or passwords.
+- Codex use was approved by compliance. Use a company ChatGPT account for it, not a personal one.
 - Audio stays on the device and is deleted once transcribed, unless **Keep audio after transcribing** is on.
-- The Whisper binary is pinned by SHA-256, and the model is verified against the hash Hugging Face publishes.
+- Learned voices are embeddings (512 numbers per meeting per person), not recordings, and never leave `%APPDATA%Kashaoices.json`. They are biometric-like data: tell people on the call when you're transcribing, and turn **Recognise people from past meetings** off if your policy requires it.
+- The speech binaries are pinned by SHA-256, and every model is verified against the hash its publisher lists.
 
 ### Memory use
 
 - The GPU process is disabled, since the UI renders fine on the CPU.
 - Closing the window destroys it; Kasha keeps running in the tray.
 - The prompt and the recording bar are created only when needed and destroyed afterwards.
-- Whisper runs once per meeting, after the call, at below-normal priority, and exits.
+- Speech runs one chunk at a time at below-normal priority and exits after each, so no model stays loaded during the call. Speaker separation runs once per call in its own process and exits.
 
 ## Development
 

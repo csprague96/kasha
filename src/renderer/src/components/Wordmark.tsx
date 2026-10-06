@@ -1,17 +1,29 @@
 import { useEffect, useRef, useState } from 'react'
 import { Logo } from './Logo'
 
-/** Cross-stitch mark from the brand sheet. */
+/** Cross-stitch mark, in the logo's blue with a gold center. */
 function Stitch({ size = 20 }: { size?: number }) {
   const cells = [
     [16, 0], [8, 8], [16, 8], [24, 8], [0, 16], [8, 16], [24, 16], [32, 16], [8, 24], [16, 24], [24, 24], [16, 32]
   ]
   return (
-    <svg width={size} height={size} viewBox="0 0 40 40" aria-hidden="true" className="text-primary">
-      {cells.map(([x, y]) => (
-        <rect key={`${x}-${y}`} x={x} y={y} width="7" height="7" fill="currentColor" />
-      ))}
-      <rect x="16" y="16" width="7" height="7" fill="var(--record)" />
+    <svg width={size} height={size} viewBox="0 0 40 40" aria-hidden="true">
+      <defs>
+        <linearGradient id="stitch-blue" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#00C6FF" />
+          <stop offset="1" stopColor="#0072FF" />
+        </linearGradient>
+        <linearGradient id="stitch-gold" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#FFE000" />
+          <stop offset="1" stopColor="#FFA500" />
+        </linearGradient>
+      </defs>
+      <g fill="url(#stitch-blue)">
+        {cells.map(([x, y]) => (
+          <rect key={`${x}-${y}`} x={x} y={y} width="7" height="7" />
+        ))}
+      </g>
+      <rect x="16" y="16" width="7" height="7" fill="url(#stitch-gold)" />
     </svg>
   )
 }
@@ -40,15 +52,21 @@ export function Wordmark() {
       onMouseEnter={enter}
       onMouseLeave={() => setOver(false)}
     >
-      <Logo className="text-primary" />
-      <span lang={over ? 'uk' : undefined}>{over ? 'Каша' : 'Kasha'}</span>
+      <Logo animate={over} />
+      <span
+        lang={over ? 'uk' : undefined}
+        style={{ display: 'inline-block', animation: over ? 'kasha-lift .9s .4s cubic-bezier(.34,1.56,.64,1) both' : 'none' }}
+      >
+        {over ? 'Каша' : 'Kasha'}
+      </span>
+      {/* Sits to the right of the name, where the sidebar has room. */}
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute top-full left-2 z-10 mt-2 flex items-center gap-2 rounded-md border border-border bg-surface px-2 py-1.5 transition-[opacity,transform] duration-200"
-        style={{ opacity: pop ? 1 : 0, transform: pop ? 'translateY(0)' : 'translateY(-4px)' }}
+        className="pointer-events-none absolute top-1/2 left-full z-10 ml-3 flex items-center gap-1.5 whitespace-nowrap transition-[opacity,transform] duration-200"
+        style={{ opacity: pop ? 1 : 0, transform: pop ? 'translate(0, -50%)' : 'translate(-4px, -50%)' }}
       >
-        <Stitch />
-        <span lang="uk" className="font-mono text-xs font-medium">
+        <Stitch size={16} />
+        <span lang="uk" className="kasha-gradient-text font-mono text-xs font-semibold">
           смачного
         </span>
       </div>

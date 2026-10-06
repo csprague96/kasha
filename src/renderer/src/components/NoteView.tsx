@@ -1,9 +1,10 @@
 import { ExternalLink, Loader2, RefreshCw, Trash2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { Meeting, RecordingInfo, Settings, TranscriptSegment } from '@shared/types'
-import { clock, cn, hhmm, meetingMeta, timer } from '@/lib/utils'
+import { cn, hhmm, meetingMeta, timer } from '@/lib/utils'
 import { Editor } from './Editor'
 import { SharePopover } from './SharePopover'
+import { Transcript } from './Transcript'
 import { Button } from './ui/button'
 
 interface Props {
@@ -73,11 +74,13 @@ function Actions({ meeting, recording, progress, settings, hasTranscript }: Prop
     )
   }
 
-  if (meeting.status === 'transcribing' || meeting.status === 'summarizing') {
+  if (meeting.status === 'transcribing' || meeting.status === 'separating' || meeting.status === 'summarizing') {
     const label =
       meeting.status === 'transcribing'
         ? `Transcribing${progress !== undefined ? ` ${Math.round(progress * 100)}%` : ''}`
-        : 'Writing summary'
+        : meeting.status === 'separating'
+          ? 'Telling speakers apart'
+          : 'Writing summary'
     return (
       <div className="flex h-9 items-center gap-2 text-[13px] text-muted" role="status">
         <Loader2 className="size-4 animate-spin" />
@@ -135,6 +138,15 @@ function Actions({ meeting, recording, progress, settings, hasTranscript }: Prop
 }
 
 function Notice({ meeting }: { meeting: Meeting }) {
+  if (meeting.status === 'ready' && meeting.summaryOutdated)
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-foreground/5 px-3 py-2 text-[13px] text-muted">
+        <span>Speaker names or the transcript changed after the summary was written.</span>
+        <Button size="sm" onClick={() => void window.kasha.resummarize(meeting.id)} title="Rewrites Summary, Decisions and Actions. Your notes are kept.">
+          Update summary
+        </Button>
+      </div>
+    )
   if (meeting.status === 'failed' && meeting.error)
     return <p className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">{meeting.error}</p>
   if (meeting.error) return <p className="rounded-md bg-foreground/5 px-3 py-2 text-[13px] text-muted">{meeting.error}</p>
@@ -184,33 +196,6 @@ function Tags({ meeting }: { meeting: Meeting }) {
   )
 }
 
-function Transcript({ segments, meeting }: { segments: TranscriptSegment[]; meeting: Meeting }) {
-  if (!segments.length) {
-    const msg =
-      meeting.status === 'recording'
-        ? 'Recording. The transcript is created on this PC when the call ends.'
-        : meeting.status === 'transcribing'
-          ? 'Transcribing on this PC.'
-          : meeting.status === 'draft'
-            ? 'No recording for this note.'
-            : 'No speech was detected in the recording.'
-    return <p className="text-muted">{msg}</p>
-  }
-  return (
-    <ol className="flex max-w-[76ch] flex-col gap-3">
-      {segments.map((s, i) => (
-        <li key={i} className="grid grid-cols-[52px_64px_1fr] gap-2 leading-relaxed">
-          <span className="tabular pt-[3px] font-mono text-xs text-muted">{clock(s.start)}</span>
-          <span className={cn('text-[13px] pt-[1px]', s.speaker === 'you' ? 'font-medium' : 'text-muted')}>
-            {s.speaker === 'you' ? 'You' : 'Others'}
-          </span>
-          <span className="text-[15px]">{s.text}</span>
-        </li>
-      ))}
-    </ol>
-  )
-}
-
 export function NoteView(props: Props) {
   const { meeting } = props
   const [tab, setTab] = useState<Tab>('notes')
@@ -222,16 +207,35 @@ export function NoteView(props: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meeting.id])
 
-  // When processing finishes the note and transcript on disk change; reload them.
+  // Reload the note and transcript after they were rewritten on disk.
+  const reload = () =>
+    void window.kasha.getMeeting(meeting.id).then(
+      (r) => r && setData((cur) => ({ note: r.note, transcript: r.transcript, version: (cur?.version ?? 0) + 1 }))
+    )
+
+  // When processing finishes the note and transcript on disk change.
   useEffect(() => {
     const was = prevStatus.current
     prevStatus.current = meeting.status
-    if (was !== meeting.status && (was === 'transcribing' || was === 'summarizing')) {
-      void window.kasha.getMeeting(meeting.id).then(
-        (r) => r && setData((cur) => ({ note: r.note, transcript: r.transcript, version: (cur?.version ?? 0) + 1 }))
-      )
-    }
+    if (was !== meeting.status && (was === 'transcribing' || was === 'separating' || was === 'summarizing')) reload()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meeting.status, meeting.id])
+
+  // Lines from live transcription arrive while the call is going.
+  useEffect(
+    () =>
+      window.kasha.onTranscriptLive((id, segs) => {
+        if (id !== meeting.id) return
+        setData((cur) => cur && { ...cur, transcript: [...cur.transcript, ...segs].sort((a, b) => a.start - b.start) })
+      }),
+    [meeting.id]
+  )
+
+  const writing = meeting.status === 'recording' || meeting.status === 'transcribing' || meeting.status === 'separating'
+  const saveTranscript = (segs: TranscriptSegment[]) => {
+    setData((cur) => cur && { ...cur, transcript: segs })
+    void window.kasha.saveTranscript(meeting.id, segs)
+  }
 
   const processing = meeting.status === 'summarizing'
   const syncedAt = meeting.sync.state === 'synced' && meeting.sync.at ? ` · Synced ${hhmm(new Date(meeting.sync.at))}` : ''
@@ -268,13 +272,24 @@ export function NoteView(props: Props) {
 
       <div className="flex flex-1 flex-col gap-6 px-10 py-6 max-[820px]:px-6">
         <Notice meeting={meeting} />
-        {data && tab === 'notes' && (
-          <>
+        {/* The editor stays mounted on the Transcript tab, so it never shows an older copy of the note. */}
+        {data && (
+          <div className={cn('flex flex-col gap-6', tab !== 'notes' && 'hidden')}>
             <Editor meetingId={meeting.id} markdown={data.note} version={data.version} editable={!processing} />
             <Tags meeting={meeting} />
-          </>
+          </div>
         )}
-        {data && tab === 'transcript' && <Transcript segments={data.transcript} meeting={meeting} />}
+        {data && tab === 'transcript' && (
+          <Transcript
+            meeting={meeting}
+            segments={data.transcript}
+            note={data.note}
+            live={meeting.status === 'recording'}
+            liveEnabled={props.settings.liveTranscription}
+            onSave={writing ? undefined : saveTranscript}
+            onReplaced={reload}
+          />
+        )}
       </div>
     </div>
   )

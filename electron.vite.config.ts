@@ -5,7 +5,16 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   main: {
-    resolve: { alias: { '@shared': resolve('src/shared') } }
+    resolve: { alias: { '@shared': resolve('src/shared') } },
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/main/index.ts'),
+          // Speaker separation runs in its own process; see speakers.ts.
+          'speakers-worker': resolve('src/main/speakers-worker.ts')
+        }
+      }
+    }
   },
   preload: {
     resolve: { alias: { '@shared': resolve('src/shared') } }

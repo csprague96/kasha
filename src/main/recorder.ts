@@ -10,7 +10,7 @@ class WavWriter {
 
   constructor(readonly file: string) {
     this.fd = openSync(file, 'w')
-    writeSync(this.fd, header(0))
+    writeSync(this.fd, wavHeader(0))
   }
 
   write(pcm: Buffer): void {
@@ -19,13 +19,13 @@ class WavWriter {
   }
 
   close(): number {
-    writeSync(this.fd, header(this.bytes), 0, 44, 0)
+    writeSync(this.fd, wavHeader(this.bytes), 0, 44, 0)
     closeSync(this.fd)
     return this.bytes
   }
 }
 
-function header(dataBytes: number): Buffer {
+export function wavHeader(dataBytes: number): Buffer {
   const b = Buffer.alloc(44)
   b.write('RIFF', 0)
   b.writeUInt32LE(36 + dataBytes, 4)

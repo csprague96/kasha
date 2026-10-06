@@ -1,6 +1,14 @@
-import { Check } from 'lucide-react'
+import { Check, X } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
-import { APP_LABELS, type SetupStatus, type Settings as SettingsT } from '@shared/types'
+import {
+  APP_LABELS,
+  normName,
+  type CalendarMatch,
+  type SetupStatus,
+  type Settings as SettingsT,
+  type VocabularyEntry,
+  type VoiceProfile
+} from '@shared/types'
 import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -30,13 +38,15 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+/** A labelled control. `group` is for several controls (a list with buttons), where a <label> would click the first one. */
+function Field({ label, hint, group, children }: { label: string; hint?: string; group?: boolean; children: ReactNode }) {
+  const Tag = group ? 'div' : 'label'
   return (
-    <label className="flex flex-col gap-1.5">
+    <Tag className="flex flex-col gap-1.5" role={group ? 'group' : undefined} aria-label={group ? label : undefined}>
       <span className="text-xs text-muted">{label}</span>
       {children}
       {hint && <span className="text-xs text-muted">{hint}</span>}
-    </label>
+    </Tag>
   )
 }
 
@@ -48,6 +58,17 @@ function Toggle({ label, checked, onChange, hint }: { label: string; checked: bo
         {hint && <span className="text-xs text-muted">{hint}</span>}
       </div>
       <Switch checked={checked} onCheckedChange={onChange} aria-label={label} />
+    </div>
+  )
+}
+
+function EngineStatus({ name, s, signIn }: { name: string; s: { installed: boolean; signedIn: boolean }; signIn: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-muted">{name}</span>
+      <span className={cn(s.signedIn ? 'text-ok' : 'text-muted')}>
+        {s.signedIn ? 'Signed in' : s.installed ? `Not signed in. In a terminal, ${signIn}.` : 'Not installed'}
+      </span>
     </div>
   )
 }
@@ -101,6 +122,165 @@ export function VaultPicker({ settings, onChange, vaults }: Props & { vaults: st
   )
 }
 
+const splitList = (v: string) =>
+  v
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean)
+
+/** Names and product terms the speech model should spell right. */
+function Vocabulary({ entries, onChange }: { entries: VocabularyEntry[]; onChange: (v: VocabularyEntry[]) => void }) {
+  const [term, setTerm] = useState('')
+  const [heard, setHeard] = useState('')
+  const add = () => {
+    const t = term.trim()
+    if (!t) return
+    const existing = entries.find((e) => e.term.toLowerCase() === t.toLowerCase())
+    const extra = splitList(heard)
+    onChange(
+      existing
+        ? entries.map((e) => (e === existing ? { ...e, heardAs: Array.from(new Set([...e.heardAs, ...extra])) } : e))
+        : [...entries, { term: t, heardAs: extra }]
+    )
+    setTerm('')
+    setHeard('')
+  }
+  const update = (i: number, patch: Partial<VocabularyEntry>) => onChange(entries.map((e, j) => (j === i ? { ...e, ...patch } : e)))
+
+  return (
+    <div className="flex flex-col gap-3">
+      {entries.length > 0 && (
+        <div className="flex flex-col divide-y divide-border rounded-md border border-border bg-surface">
+          {entries.map((e, i) => (
+            <div key={`${e.term}-${i}`} className="grid grid-cols-[1fr_1fr_auto] items-center gap-2 px-2 py-1.5">
+              <LazyInput
+                aria-label="Name or term"
+                className="h-8 border-transparent bg-transparent px-1.5 font-medium hover:border-border"
+                value={e.term}
+                onCommit={(v) => (v.trim() ? update(i, { term: v.trim() }) : onChange(entries.filter((_, j) => j !== i)))}
+              />
+              <LazyInput
+                aria-label={`Often heard as, for ${e.term}`}
+                placeholder="Often heard as"
+                className="h-8 border-transparent bg-transparent px-1.5 text-[13px] hover:border-border"
+                value={e.heardAs.join(', ')}
+                onCommit={(v) => update(i, { heardAs: splitList(v) })}
+              />
+              <Button variant="ghost" size="icon" aria-label={`Remove ${e.term}`} onClick={() => onChange(entries.filter((_, j) => j !== i))}>
+                <X className="text-muted" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
+        <Input value={term} onChange={(e) => setTerm(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} placeholder="Name or term, e.g. RCVR" aria-label="New name or term" />
+        <Input value={heard} onChange={(e) => setHeard(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} placeholder="Often heard as, e.g. Recover" aria-label="Often heard as" />
+        <Button onClick={add} disabled={!term.trim()}>
+          Add
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/** A list of meeting titles or names, with remove buttons and an add box. */
+function NameList({ items, onChange, placeholder, label }: { items: string[]; onChange: (v: string[]) => void; placeholder?: string; label: string }) {
+  const [v, setV] = useState('')
+  const add = () => {
+    const t = v.trim()
+    if (!t) return
+    if (!items.some((x) => normName(x) === normName(t))) onChange([...items, t])
+    setV('')
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      {items.length > 0 && (
+        <ul className="flex flex-col divide-y divide-border rounded-md border border-border bg-surface">
+          {items.map((x) => (
+            <li key={x} className="flex items-center justify-between gap-3 px-3 py-1 text-[13px]">
+              <span className="truncate">{x}</span>
+              <Button variant="ghost" size="icon" aria-label={`Remove ${x}`} onClick={() => onChange(items.filter((y) => y !== x))}>
+                <X className="size-3.5 text-muted" />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {placeholder && (
+        <div className="grid grid-cols-[1fr_auto] gap-2">
+          <Input value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} placeholder={placeholder} aria-label={label} />
+          <Button onClick={add} disabled={!v.trim()}>
+            Add
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const MODES: Array<{ value: SettingsT['recording']['mode']; label: string; hint: string }> = [
+  { value: 'ask', label: 'Ask each time', hint: 'A prompt in the corner when a call starts. Meetings and people below are recorded without asking.' },
+  { value: 'always', label: 'Record every call', hint: 'No prompt. The recording bar shows while Kasha records, and Stop ends it.' },
+  { value: 'rules', label: 'Only the meetings and people below', hint: 'No prompt for anything else. Start other recordings yourself.' }
+]
+
+/** Runs the Outlook lookup once, so the user can see whether it works for them. */
+function CalendarCheck() {
+  const [state, setState] = useState<'idle' | 'checking' | { match: CalendarMatch | null }>('idle')
+  const check = async () => {
+    setState('checking')
+    setState({ match: await window.kasha.checkCalendar() })
+  }
+  return (
+    <div className="flex items-center gap-3 text-[13px]">
+      <Button size="sm" onClick={() => void check()} disabled={state === 'checking'}>
+        {state === 'checking' ? 'Checking…' : 'Check now'}
+      </Button>
+      {typeof state === 'object' && (
+        <span className="text-muted" role="status">
+          {state.match
+            ? `Found ${state.match.subject ? `“${state.match.subject}”` : 'a meeting'} with ${state.match.attendees.length} ${state.match.attendees.length === 1 ? 'person' : 'people'} invited.`
+            : 'No meeting found right now. Try during a meeting. If it never works, turn on the Microsoft 365 connector in Claude.'}
+        </span>
+      )}
+    </div>
+  )
+}
+
+/** People whose voices Kasha has learned. Removing one forgets the voice; the notes keep their names. */
+function Voices() {
+  const [voices, setVoices] = useState<VoiceProfile[] | null>(null)
+  const refresh = () => void window.kasha.listVoices().then(setVoices)
+  useEffect(() => {
+    refresh()
+    return window.kasha.onMeetingsChanged(refresh)
+  }, [])
+  if (!voices) return null
+  if (!voices.length) return <p className="text-[13px] text-muted">No voices learned yet. Name a speaker in a transcript and Kasha will recognise them next time.</p>
+  return (
+    <ul className="flex flex-col divide-y divide-border rounded-md border border-border">
+      {voices.map((v) => (
+        <li key={v.name} className="flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]">
+          <span className="truncate">{v.name}</span>
+          <span className="ml-auto shrink-0 text-xs text-muted">
+            {v.meetings} {v.meetings === 1 ? 'meeting' : 'meetings'}
+          </span>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={`Forget ${v.name}'s voice`}
+            title="Forget this voice"
+            onClick={() => void window.kasha.removeVoice(v.name).then(refresh)}
+          >
+            <X className="size-3.5" />
+          </Button>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 function preview(s: SettingsT): string {
   return [
     '---',
@@ -124,6 +304,8 @@ export function Settings({ settings, onChange }: Props) {
   const [status] = useSetupStatus()
   const ob = settings.obsidian
   const setOb = (patch: Partial<SettingsT['obsidian']>) => onChange({ obsidian: { ...ob, ...patch } })
+  const rec = settings.recording
+  const setRec = (patch: Partial<SettingsT['recording']>) => onChange({ recording: { ...rec, ...patch } })
 
   return (
     <div className="flex max-w-[620px] flex-col gap-10 px-10 py-8 max-[820px]:px-6">
@@ -151,8 +333,58 @@ export function Settings({ settings, onChange }: Props) {
         </Field>
       </Section>
 
+      <Section title="Recording">
+        <div className="flex flex-col gap-2" role="radiogroup" aria-label="When a call starts">
+          <span className="text-xs text-muted">When a call starts</span>
+          {MODES.map((m) => (
+            <label key={m.value} className="flex cursor-pointer items-start gap-2.5">
+              <input
+                type="radio"
+                name="record-mode"
+                className="mt-1 accent-[var(--color-primary)]"
+                checked={rec.mode === m.value}
+                onChange={() => void setRec({ mode: m.value })}
+              />
+              <span className="flex flex-col">
+                <span>{m.label}</span>
+                <span className="text-xs text-muted">{m.hint}</span>
+              </span>
+            </label>
+          ))}
+          {rec.mode !== 'ask' && (
+            <p className="text-xs text-muted">Recording without asking: check your team’s rules on letting people know a call is recorded.</p>
+          )}
+        </div>
+        <Field group label="Always record these meetings" hint="Matched on the meeting’s title. When you record a recurring meeting, Kasha offers to add it here.">
+          <NameList items={rec.meetings} onChange={(meetings) => void setRec({ meetings })} placeholder="Meeting title, e.g. Weekly product sync" label="New meeting title" />
+        </Field>
+        {rec.declined.length > 0 && (
+          <Field group label="Kasha won’t offer to always record" hint="You chose “Just this once” for these. Remove one to be asked again.">
+            <NameList items={rec.declined} onChange={(declined) => void setRec({ declined })} label="Meeting title not to offer" />
+          </Field>
+        )}
+        <Field
+          group
+          label="Always record calls with"
+          hint={
+            rec.lookupAttendees
+              ? 'Matched on the call’s title (1:1 calls and huddles show the other person’s name) and on the Outlook invite list.'
+              : 'Matched on the call’s title, which shows the other person’s name on 1:1 calls and huddles. Turn on the Outlook lookup below to match group meetings too.'
+          }
+        >
+          <NameList items={rec.people} onChange={(people) => void setRec({ people })} placeholder="First and last name" label="New person" />
+        </Field>
+        <Toggle
+          label="Look up who’s invited in Outlook"
+          hint="Asks Claude Code to find the call in your calendar through your Claude account’s Microsoft 365 connector. Names help label speakers and the summary. Takes about 10 seconds per call."
+          checked={rec.lookupAttendees}
+          onChange={(v) => void setRec({ lookupAttendees: v })}
+        />
+        {rec.lookupAttendees && <CalendarCheck />}
+      </Section>
+
       <Section title="Meeting detection">
-        <p className="-mt-2 text-[13px] text-muted">Kasha asks to transcribe when one of these apps starts using your microphone.</p>
+        <p className="-mt-2 text-[13px] text-muted">Kasha notices a call when one of these apps starts using your microphone.</p>
         <div className="flex flex-col gap-3">
           {(Object.keys(settings.detect) as Array<keyof SettingsT['detect']>).map((app) => (
             <Toggle
@@ -169,34 +401,96 @@ export function Settings({ settings, onChange }: Props) {
       <Section title="Transcription">
         <div className="flex items-center justify-between gap-4">
           <div className="flex flex-col">
-            <span>Speech model</span>
-            <span className="text-xs text-muted">Whisper small, English. Runs on this PC.</span>
+            <span>Speech models</span>
+            <span className="text-xs text-muted">
+              {status?.whisper.engine === 'parakeet'
+                ? 'Parakeet, English. Runs on this PC.'
+                : status?.whisper.engine === 'whisper'
+                  ? 'Whisper small. The Parakeet download is about four times faster.'
+                  : 'Runs on this PC. Audio never leaves it.'}
+            </span>
           </div>
-          {status?.whisper.ready ? (
-            <span className="text-[13px] text-ok">Installed</span>
-          ) : status?.whisper.downloading ? (
+          {status?.whisper.downloading ? (
             <span className="tabular text-[13px] text-muted">Downloading {Math.round(status.whisper.progress * 100)}%</span>
-          ) : (
+          ) : status?.whisper.ready && status.whisper.engine === 'parakeet' && status.whisper.speakers ? (
+            <span className="text-[13px] text-ok">Installed</span>
+          ) : status ? (
             <Button size="sm" onClick={() => void window.kasha.downloadWhisper()}>
-              Download (200 MB)
+              Download ({status.whisper.downloadMb} MB)
             </Button>
+          ) : null}
+        </div>
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex flex-col">
+              <span>Summaries</span>
+              <span className="text-xs text-muted">Written using your own sign-in. Only the transcript text is sent.</span>
+            </div>
+            <select
+              aria-label="Summary engine"
+              value={settings.summaryEngine}
+              onChange={(e) => void onChange({ summaryEngine: e.target.value as SettingsT['summaryEngine'] })}
+              className="h-9 rounded-md border border-border bg-surface px-2 text-sm focus-visible:outline-offset-0"
+            >
+              <option value="auto">Automatic</option>
+              <option value="claude">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select>
+          </div>
+          {status && (
+            <div className="flex flex-col gap-1 text-[13px]">
+              <EngineStatus name="Claude Code" s={status.claude} signIn="run claude" />
+              <EngineStatus name="Codex" s={status.codex} signIn="run codex login" />
+            </div>
+          )}
+          {settings.summaryEngine === 'auto' && (
+            <span className="text-xs text-muted">Automatic uses Claude Code when signed in, otherwise Codex.</span>
           )}
         </div>
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex flex-col">
-            <span>Summaries</span>
-            <span className="text-xs text-muted">Written by Claude Code using your sign-in. Only the transcript text is sent.</span>
-          </div>
-          <span className={cn('text-[13px]', status?.claude.signedIn ? 'text-ok' : 'text-muted')}>
-            {!status ? '' : status.claude.signedIn ? 'Signed in' : status.claude.installed ? 'Not signed in' : 'Not installed'}
-          </span>
-        </div>
+        <Toggle
+          label="Transcribe during the call"
+          hint="Spreads the work across the call at low priority, so notes are ready soon after it ends. Turn off to transcribe after the call instead."
+          checked={settings.liveTranscription}
+          onChange={(v) => onChange({ liveTranscription: v })}
+        />
+        {settings.liveTranscription && (
+          <Toggle
+            label="Wait when memory is low"
+            hint="Holds off transcribing during the call while the PC has under 1.5 GB free. Nothing is lost: it catches up once memory frees or the call ends. You can also pause it from the recording bar."
+            checked={rec.pauseWhenLowMemory}
+            onChange={(v) => void setRec({ pauseWhenLowMemory: v })}
+          />
+        )}
         <Toggle
           label="Keep audio after transcribing"
           hint="Off by default. Audio is deleted once the transcript is saved."
           checked={settings.keepAudio}
           onChange={(v) => onChange({ keepAudio: v })}
         />
+      </Section>
+
+      <Section title="Speakers">
+        <Toggle
+          label="Tell speakers apart"
+          hint="After a call, the people on the computer's audio become Speaker 1, Speaker 2 and so on. Rename them at the top of the transcript."
+          checked={settings.speakers.separate}
+          onChange={(v) => onChange({ speakers: { ...settings.speakers, separate: v } })}
+        />
+        <Toggle
+          label="Recognise people from past meetings"
+          hint="When you name a speaker, Kasha remembers the voice and uses the name next time. Voices stay on this PC."
+          checked={settings.speakers.recognize}
+          onChange={(v) => onChange({ speakers: { ...settings.speakers, recognize: v } })}
+        />
+        {settings.speakers.recognize && <Voices />}
+      </Section>
+
+      <Section title="Names and terms">
+        <p className="-mt-2 text-[13px] text-muted">
+          People’s names and product terms the speech model should spell right. Kasha passes them to it as hints, and replaces
+          what it often hears instead, wherever it appears as a whole word.
+        </p>
+        <Vocabulary entries={settings.vocabulary} onChange={(vocabulary) => void onChange({ vocabulary })} />
       </Section>
 
       <Section title="Actions">

@@ -8,34 +8,63 @@ import type { SetupStatus } from '@shared/types'
 import { paths } from './store'
 
 // Everything is pinned by SHA-256 so a tampered or truncated file is rejected.
-// b5130 is the most recent whisper.cpp release that ships Windows binaries.
+// whisper.cpp 1.9.4 Windows binaries: whisper-cli, parakeet-cli and the VAD tool.
 const WHISPER_ZIP = {
   url: 'https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-bin-x64.zip',
   size: 8_573_270,
   sha256: 'f9ec6c52a2e949b62ab51fa21d0d497958f9e41c3010c157c4e42932d5316f3c'
 }
-// small.en, 5-bit quantized: same transcript quality as the full model in testing,
-// a third of the download and ~300 MB less RAM while transcribing.
-const MODEL = {
-  name: 'ggml-small.en-q5_1.bin',
-  url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en-q5_1.bin',
-  size: 190_098_681,
-  sha256: 'bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30'
+// NVIDIA Parakeet TDT 0.6B v3, 4-bit: about four times faster than Whisper
+// small on the CPU, with word timings built in. Converted by the whisper.cpp team.
+const PARAKEET = {
+  name: 'ggml-parakeet-tdt-0.6b-v3-q4_0.bin',
+  url: 'https://huggingface.co/ggml-org/parakeet-GGUF/resolve/main/ggml-parakeet-tdt-0.6b-v3-q4_0.bin',
+  size: 355_615_679,
+  sha256: 'aa7fe2f5fb47d863ca23e8b1d490632d63a2599f515268b6d6bd656158dad45e'
 }
-// Silero voice activity detection: Whisper skips silence, roughly halving transcription time.
+// Whisper small.en, 5-bit. No longer downloaded; still used where it's already installed and Parakeet isn't.
+const WHISPER_MODEL = {
+  name: 'ggml-small.en-q5_1.bin',
+  size: 190_098_681
+}
+// Silero voice activity detection: finds where speech starts and stops.
 const VAD = {
   name: 'ggml-silero-v5.1.2.bin',
   url: 'https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin',
   size: 885_098,
   sha256: '29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf'
 }
-
-export const DOWNLOAD_MB = Math.round((WHISPER_ZIP.size + MODEL.size + VAD.size) / 1_000_000)
+// Speaker separation: pyannote segmentation 3.0 (8-bit), packaged by sherpa-onnx.
+const SEGMENTATION = {
+  archive: 'sherpa-onnx-pyannote-segmentation-3-0.tar.bz2',
+  url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2',
+  size: 6_958_444,
+  sha256: '24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488',
+  inner: join('sherpa-onnx-pyannote-segmentation-3-0', 'model.int8.onnx'),
+  name: 'pyannote-segmentation-3.0.int8.onnx',
+  fileSize: 1_540_506
+}
+// Voice embeddings for telling speakers apart and recognising them later: 3D-Speaker CAM++, English.
+const EMBEDDING = {
+  name: '3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx',
+  url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx',
+  size: 29_596_978,
+  sha256: '357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b'
+}
 
 export const whisperPaths = {
-  model: () => join(paths.bin(), MODEL.name),
+  model: () => join(paths.bin(), WHISPER_MODEL.name),
+  parakeet: () => join(paths.bin(), PARAKEET.name),
   vad: () => join(paths.bin(), VAD.name),
-  cli: () => findFile(paths.bin(), 'whisper-cli.exe')
+  cli: () => findFile(paths.bin(), 'whisper-cli.exe'),
+  parakeetCli: () => findFile(paths.bin(), 'parakeet-cli.exe'),
+  // Ships in the same zip; finds where speech starts and stops.
+  vadCli: () => findFile(paths.bin(), 'whisper-vad-speech-segments.exe')
+}
+
+export const speakerPaths = {
+  segmentation: () => join(paths.bin(), SEGMENTATION.name),
+  embedding: () => join(paths.bin(), EMBEDDING.name)
 }
 
 function findFile(dir: string, name: string): string | null {
@@ -51,13 +80,40 @@ function findFile(dir: string, name: string): string | null {
   return null
 }
 
-let download: SetupStatus['whisper'] = { ready: false, downloading: false, progress: 0 }
+let download: Pick<SetupStatus['whisper'], 'downloading' | 'progress' | 'error'> = { downloading: false, progress: 0 }
 
 const hasFile = (file: string, size: number) => existsSync(file) && statSync(file).size === size
 
-export function whisperReady(): boolean {
-  return !!whisperPaths.cli() && hasFile(whisperPaths.model(), MODEL.size) && hasFile(whisperPaths.vad(), VAD.size)
+const toolsReady = () => !!whisperPaths.cli() && !!whisperPaths.parakeetCli() && !!whisperPaths.vadCli() && hasFile(whisperPaths.vad(), VAD.size)
+
+/** Which speech model transcribes: Parakeet when installed, else an existing Whisper model. */
+export function speechEngine(): 'parakeet' | 'whisper' | null {
+  if (!toolsReady()) return null
+  if (hasFile(whisperPaths.parakeet(), PARAKEET.size)) return 'parakeet'
+  if (hasFile(whisperPaths.model(), WHISPER_MODEL.size)) return 'whisper'
+  return null
 }
+
+export const speechReady = (): boolean => speechEngine() !== null
+
+/** The speaker models are optional extras; without them everyone on the call is "Others". */
+export function speakersReady(): boolean {
+  return hasFile(speakerPaths.segmentation(), SEGMENTATION.fileSize) && hasFile(speakerPaths.embedding(), EMBEDDING.size)
+}
+
+/** What a download would fetch now: only the parts that are missing. */
+function missing(): Array<{ url: string; size: number; sha256: string; dest: string }> {
+  const dir = paths.bin()
+  const out: Array<{ url: string; size: number; sha256: string; dest: string }> = []
+  if (!whisperPaths.cli() || !whisperPaths.parakeetCli() || !whisperPaths.vadCli()) out.push({ ...WHISPER_ZIP, dest: join(dir, 'whisper-bin-x64.zip') })
+  if (!hasFile(whisperPaths.vad(), VAD.size)) out.push({ ...VAD, dest: whisperPaths.vad() })
+  if (!hasFile(whisperPaths.parakeet(), PARAKEET.size)) out.push({ ...PARAKEET, dest: whisperPaths.parakeet() })
+  if (!hasFile(speakerPaths.segmentation(), SEGMENTATION.fileSize)) out.push({ ...SEGMENTATION, dest: join(dir, SEGMENTATION.archive) })
+  if (!hasFile(speakerPaths.embedding(), EMBEDDING.size)) out.push({ ...EMBEDDING, dest: speakerPaths.embedding() })
+  return out
+}
+
+export const downloadMb = (): number => Math.round(missing().reduce((t, f) => t + f.size, 0) / 1_000_000)
 
 /**
  * Streams a URL to disk via Chromium's network stack (honours the system proxy)
@@ -107,11 +163,21 @@ function sha256File(file: string): Promise<string> {
   })
 }
 
-export async function downloadWhisper(onChange: () => void): Promise<void> {
+/** Windows 10+ ships a bsdtar that reads zip and tar.bz2. Full path: Git's tar is often first on PATH and can't. */
+function extract(archive: string, dir: string): Promise<void> {
+  const tar = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe')
+  return new Promise<void>((resolve, reject) =>
+    execFile(tar, ['-xf', archive, '-C', dir], { windowsHide: true }, (err) => (err ? reject(err) : resolve()))
+  )
+}
+
+/** Downloads whatever is missing: the speech tools, the Parakeet model and the speaker models. */
+export async function downloadSpeech(onChange: () => void): Promise<void> {
   if (download.downloading) return
-  download = { ready: false, downloading: true, progress: 0 }
+  download = { downloading: true, progress: 0 }
   onChange()
-  const total = WHISPER_ZIP.size + MODEL.size + VAD.size
+  const files = missing()
+  const total = files.reduce((t, f) => t + f.size, 0)
   let got = 0
   let lastTick = 0
   const tick = (n: number) => {
@@ -119,45 +185,34 @@ export async function downloadWhisper(onChange: () => void): Promise<void> {
     const now = Date.now()
     if (now - lastTick > 250) {
       lastTick = now
-      download.progress = Math.min(0.99, got / total)
+      download.progress = total ? Math.min(0.99, got / total) : 1
       onChange()
-    }
-  }
-  const fetchVerified = async (f: { url: string; sha256: string }, dest: string) => {
-    if ((await fetchTo(f.url, dest, tick)) !== f.sha256) {
-      rmSync(dest, { force: true })
-      throw new Error('A download did not match the expected file. Try again.')
     }
   }
   try {
     const dir = paths.bin()
     mkdirSync(dir, { recursive: true })
-
-    if (!whisperPaths.cli()) {
-      const zip = join(dir, 'whisper-bin-x64.zip')
-      await fetchVerified(WHISPER_ZIP, zip)
-      // Windows 10+ ships a bsdtar that handles zip archives. Use the full path:
-      // Git's GNU tar is often first on PATH and can't read zips or C:\ paths.
-      const tar = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe')
-      await new Promise<void>((resolve, reject) =>
-        execFile(tar, ['-xf', zip, '-C', dir], { windowsHide: true }, (err) => (err ? reject(err) : resolve()))
-      )
-      rmSync(zip, { force: true })
-      if (!whisperPaths.cli()) throw new Error('whisper-cli.exe was not found in the download.')
-    } else {
-      got += WHISPER_ZIP.size
+    for (const f of files) {
+      if ((await fetchTo(f.url, f.dest, tick)) !== f.sha256) {
+        rmSync(f.dest, { force: true })
+        throw new Error('A download did not match the expected file. Try again.')
+      }
+      if (f.dest.endsWith('.zip')) {
+        await extract(f.dest, dir)
+        rmSync(f.dest, { force: true })
+        if (!whisperPaths.cli() || !whisperPaths.parakeetCli()) throw new Error('The speech tools were not found in the download.')
+      } else if (f.dest.endsWith('.tar.bz2')) {
+        await extract(f.dest, dir)
+        rmSync(f.dest, { force: true })
+        const inner = join(dir, SEGMENTATION.inner)
+        if (!hasFile(inner, SEGMENTATION.fileSize)) throw new Error('The speaker model was not found in the download.')
+        renameSync(inner, speakerPaths.segmentation())
+        rmSync(join(dir, SEGMENTATION.inner.split(/[\\/]/)[0]), { recursive: true, force: true })
+      }
     }
-
-    for (const [f, dest] of [
-      [VAD, whisperPaths.vad()],
-      [MODEL, whisperPaths.model()]
-    ] as const) {
-      if (hasFile(dest, f.size)) got += f.size
-      else await fetchVerified(f, dest)
-    }
-    download = { ready: true, downloading: false, progress: 1 }
+    download = { downloading: false, progress: 1 }
   } catch (e) {
-    download = { ready: false, downloading: false, progress: 0, error: (e as Error).message }
+    download = { downloading: false, progress: 0, error: (e as Error).message }
   }
   onChange()
 }
@@ -211,11 +266,56 @@ export function detectVaults(): string[] {
   }
 }
 
+// ---------- Codex ----------
+
+const CODEX_VENDOR = ['@openai', 'codex-win32-x64', 'vendor', 'x86_64-pc-windows-msvc', 'codex', 'codex.exe']
+
+/**
+ * Resolves the Codex executable. npm installs a .cmd shim; the native codex.exe
+ * behind it is preferred because cmd.exe quoting is fragile.
+ */
+export function codexExe(): string | null {
+  const dirs = [...(process.env.PATH ?? '').split(';').filter(Boolean), join(process.env.APPDATA ?? '', 'npm')]
+  for (const d of dirs) {
+    if (existsSync(join(d, 'codex.exe'))) return join(d, 'codex.exe')
+  }
+  for (const d of dirs) {
+    if (!existsSync(join(d, 'codex.cmd'))) continue
+    const native = [
+      join(d, 'node_modules', '@openai', 'codex', 'node_modules', ...CODEX_VENDOR),
+      join(d, 'node_modules', ...CODEX_VENDOR)
+    ].find((p) => existsSync(p))
+    return native ?? join(d, 'codex.cmd')
+  }
+  return null
+}
+
+export function codexSignedIn(): Promise<boolean> {
+  const exe = codexExe()
+  if (!exe) return Promise.resolve(false)
+  return new Promise((resolve) =>
+    execFile(
+      exe,
+      ['login', 'status'],
+      { windowsHide: true, timeout: 15000, shell: exe.endsWith('.cmd') },
+      (err, stdout, stderr) => resolve(!err && /logged in/i.test(`${stdout}${stderr}`))
+    )
+  )
+}
+
 export async function setupStatus(): Promise<SetupStatus> {
   const exe = claudeExe()
+  const codex = codexExe()
   return {
-    whisper: download.downloading ? download : { ...download, ready: whisperReady() },
+    whisper: {
+      ...download,
+      ready: !download.downloading && speechReady(),
+      engine: speechEngine(),
+      speakers: speakersReady(),
+      downloadMb: downloadMb()
+    },
     claude: { installed: !!exe, signedIn: exe ? await claudeSignedIn() : false },
+    codex: { installed: !!codex, signedIn: codex ? await codexSignedIn() : false },
     vaults: detectVaults()
   }
 }

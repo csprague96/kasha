@@ -1,66 +1,12 @@
-import { spawn } from 'node:child_process'
-import { closeSync, openSync, readFileSync, readSync, rmSync } from 'node:fs'
-import { constants, cpus, setPriority } from 'node:os'
+import { closeSync, openSync, readSync } from 'node:fs'
 import type { TranscriptSegment } from '@shared/types'
 import { SAMPLE_RATE, type Track } from './recorder'
-import { whisperPaths } from './setup'
-
-interface WhisperJson {
-  transcription: Array<{ offsets: { from: number; to: number }; text: string }>
-}
+import { addSpeech, BATCH_THREADS, detectSpeech, takeChunk, transcribeChunk, type Chunk, type Span } from './speech'
 
 const SILENCE_RMS = 120 // int16 RMS; below this a segment is near-silent
-const NOISE_TEXT = /^\s*(\[[^\]]*\]|\([^)]*\)|♪+|\.+)\s*$/
 const SILENCE_HALLUCINATIONS = /^\s*(thank you\.?|thanks for watching[.!]?|you\.?|bye\.?)\s*$/i
 
-/** Runs whisper-cli on one 16 kHz WAV file. Progress is reported 0..1. */
-function runWhisper(wav: string, onProgress: (p: number) => void): Promise<WhisperJson> {
-  const cli = whisperPaths.cli()
-  if (!cli) return Promise.reject(new Error('Speech model is not installed.'))
-  const outBase = wav.replace(/\.wav$/, '')
-  const threads = Math.max(2, Math.floor(cpus().length / 2))
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      cli,
-      [
-        '-m', whisperPaths.model(),
-        '-f', wav,
-        '-l', 'en',
-        '-t', String(threads),
-        '-oj', '-of', outBase,
-        '-np', '-pp',
-        // Skip silence. Each track is quiet while the other side talks.
-        '--vad', '-vm', whisperPaths.vad()
-      ],
-      { windowsHide: true }
-    )
-    // Keep the machine responsive: transcription yields to everything else.
-    try {
-      if (child.pid) setPriority(child.pid, constants.priority.PRIORITY_BELOW_NORMAL)
-    } catch {
-      /* not fatal */
-    }
-    let stderr = ''
-    child.stderr.on('data', (d: Buffer) => {
-      const s = d.toString()
-      stderr = (stderr + s).slice(-4000)
-      const m = /progress\s*=\s*(\d+)%/.exec(s)
-      if (m) onProgress(Number(m[1]) / 100)
-    })
-    child.stdout.resume()
-    child.on('error', reject)
-    child.on('close', (code) => {
-      if (code !== 0) return reject(new Error(`Transcription failed (exit ${code}). ${stderr.trim().split('\n').pop() ?? ''}`))
-      try {
-        const json = JSON.parse(readFileSync(`${outBase}.json`, 'utf8')) as WhisperJson
-        rmSync(`${outBase}.json`, { force: true })
-        resolve(json)
-      } catch (e) {
-        reject(e)
-      }
-    })
-  })
-}
+export const speakerOf = (track: Track) => (track === 'mic' ? 'you' : 'others')
 
 /** RMS of the int16 samples between two times, read straight from the WAV. */
 function segmentRms(fd: number, start: number, end: number): number {
@@ -96,37 +42,51 @@ function similarity(a: string, b: string): number {
  * other side. Drop "You" lines that duplicate a simultaneous "Others" line.
  */
 function removeEcho(segs: TranscriptSegment[]): TranscriptSegment[] {
-  const others = segs.filter((s) => s.speaker === 'others')
+  const others = segs.filter((s) => s.speaker !== 'you')
   return segs.filter(
     (s) =>
-      s.speaker === 'others' ||
+      s.speaker !== 'you' ||
       !others.some((o) => o.start < s.end + 1.5 && o.end > s.start - 1.5 && similarity(o.text, s.text) >= 0.6)
   )
 }
 
-export async function transcribe(
-  tracks: Array<{ track: Track; file: string }>,
-  onProgress: (p: number) => void
-): Promise<TranscriptSegment[]> {
-  const all: TranscriptSegment[] = []
-  // Run tracks one after another rather than in parallel to cap CPU and memory.
-  for (let i = 0; i < tracks.length; i++) {
-    const { track, file } = tracks[i]
-    const json = await runWhisper(file, (p) => onProgress((i + p) / tracks.length))
+/** Drops lines Whisper invented over near-silence, removes echo, and sorts by time. */
+export function finalize(tracks: Array<{ track: Track; file: string }>, segs: TranscriptSegment[]): TranscriptSegment[] {
+  const kept: TranscriptSegment[] = []
+  for (const { track, file } of tracks) {
     const fd = openSync(file, 'r')
     try {
-      for (const seg of json.transcription) {
-        const text = seg.text.trim()
-        const start = seg.offsets.from / 1000
-        const end = seg.offsets.to / 1000
-        if (!text || NOISE_TEXT.test(text)) continue
-        const rms = segmentRms(fd, start, end)
-        if (rms < SILENCE_RMS && (SILENCE_HALLUCINATIONS.test(text) || rms < SILENCE_RMS / 3)) continue
-        all.push({ start, end, speaker: track === 'mic' ? 'you' : 'others', text })
+      for (const s of segs.filter((x) => x.speaker === speakerOf(track))) {
+        const rms = segmentRms(fd, s.start, s.end)
+        if (rms < SILENCE_RMS && (SILENCE_HALLUCINATIONS.test(s.text) || rms < SILENCE_RMS / 3)) continue
+        kept.push(s)
       }
     } finally {
       closeSync(fd)
     }
   }
-  return removeEcho(all.sort((a, b) => a.start - b.start))
+  return removeEcho(kept.sort((a, b) => a.start - b.start))
+}
+
+/** Transcribes finished recordings in one go: used after a call when live transcription was off, and on Retry. */
+export async function transcribe(
+  tracks: Array<{ track: Track; file: string }>,
+  prompt: string,
+  onProgress: (p: number) => void
+): Promise<TranscriptSegment[]> {
+  const jobs: Array<{ track: Track; file: string; chunk: Chunk }> = []
+  for (const t of tracks) {
+    const queue: Span[] = []
+    addSpeech(queue, await detectSpeech(t.file))
+    for (let c = takeChunk(queue, true); c; c = takeChunk(queue, true)) jobs.push({ ...t, chunk: c })
+  }
+  const segs: TranscriptSegment[] = []
+  // Tracks run one chunk at a time rather than in parallel to cap CPU and memory.
+  for (let i = 0; i < jobs.length; i++) {
+    const { track, file, chunk } = jobs[i]
+    const tmp = file.replace(/\.wav$/, `-chunk${i}`)
+    segs.push(...(await transcribeChunk(file, chunk, speakerOf(track), { prompt, threads: BATCH_THREADS }, tmp)))
+    onProgress((i + 1) / jobs.length)
+  }
+  return finalize(tracks, segs)
 }

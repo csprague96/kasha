@@ -43,7 +43,7 @@ export function Setup({ settings, onChange }: Props) {
     <div className="flex min-h-full items-center justify-center px-4 py-10">
       <div className="flex w-full max-w-[560px] flex-col gap-6">
         <div className="flex items-center gap-3">
-          <Logo size={32} className="text-primary" />
+          <Logo size={32} />
           <h1 className="text-xl font-semibold">Set up Kasha</h1>
         </div>
         <p className="text-muted">
@@ -51,11 +51,15 @@ export function Setup({ settings, onChange }: Props) {
         </p>
 
         <div className="rounded-lg border border-border bg-surface px-5">
-          <Row done={w.ready} title="Speech model" description="Transcribes on this PC. Audio never leaves it.">
-            {!w.ready && !w.downloading && (
+          <Row
+            done={w.ready && w.speakers}
+            title="Speech models"
+            description="Transcribes on this PC and tells the people on the call apart. Audio never leaves it."
+          >
+            {!(w.ready && w.speakers) && !w.downloading && (
               <div className="flex items-center gap-3">
                 <Button variant="primary" size="sm" onClick={() => void window.kasha.downloadWhisper()}>
-                  Download (200 MB)
+                  Download ({w.downloadMb} MB)
                 </Button>
                 {w.error && <span className="text-[13px] text-destructive">{w.error}</span>}
               </div>
@@ -71,16 +75,22 @@ export function Setup({ settings, onChange }: Props) {
           </Row>
 
           <Row
-            done={status.claude.signedIn}
-            title="Claude Code"
-            description="Writes the summary from the transcript, using your existing Claude sign-in. No API key needed."
+            done={status.claude.signedIn || status.codex.signedIn}
+            title="Summaries"
+            description="Written from the transcript by Claude Code or Codex, using your existing sign-in. No API key needed."
           >
-            {!status.claude.signedIn && (
+            {status.claude.signedIn || status.codex.signedIn ? (
+              <span className="text-[13px] text-muted">
+                Using {status.claude.signedIn ? 'Claude Code' : 'Codex'}. You can change this in Settings.
+              </span>
+            ) : (
               <div className="flex flex-wrap items-center gap-3 text-[13px] text-muted">
                 <span>
                   {status.claude.installed
                     ? 'Open a terminal, run claude and sign in.'
-                    : 'Install Claude Code, then sign in. Without it you still get transcripts.'}
+                    : status.codex.installed
+                      ? 'Open a terminal and run codex login.'
+                      : 'Install Claude Code or Codex, then sign in. Without either you still get transcripts.'}
                 </span>
                 <Button size="sm" onClick={refresh}>
                   Check again

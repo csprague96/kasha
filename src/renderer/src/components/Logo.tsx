@@ -1,10 +1,83 @@
-/** Logo 2b: two text lines over a bowl. Lines take the current color. */
-export function Logo({ size = 22, className }: { size?: number; className?: string }) {
+import { useId } from 'react'
+
+/** Rounded vertical bar with semicircular ends. */
+const pill = (x: number, y: number, w: number, h: number): string => {
+  const r = w / 2
+  return `M${x},${y + r}a${r},${r} 0 0 1 ${w},0V${y + h - r}a${r},${r} 0 0 1 ${-w},0Z`
+}
+
+type Stops = readonly [string, string]
+const BLUE: Stops = ['#00C6FF', '#0072FF']
+const GOLD: Stops = ['#FFE000', '#FFA500']
+const FOLD: Stops = ['#33D2FF', '#33D2FF']
+const FOLD_GOLD: Stops = ['#FFE45C', '#FFE45C']
+
+type Part = { k: string; base: Stops; swap: Stops; d: string; bar: boolean; anim: string; delay: number }
+
+/** Sound bars, the K stem, and the folded arrow, in paint order. */
+const PARTS: Part[] = [
+  { k: 'pS', base: BLUE, swap: GOLD, bar: true, anim: 'kasha-pump .9s 0s', delay: 0.1, d: pill(184, 508, 100, 273) },
+  { k: 'pY', base: GOLD, swap: BLUE, bar: true, anim: 'kasha-pump .9s .07s', delay: 0.17, d: pill(317, 391, 114, 478) },
+  { k: 'pT', base: BLUE, swap: GOLD, bar: true, anim: 'kasha-pump .9s .14s', delay: 0.24, d: 'M463,800V346a104,104 0 0 1 208,0V800Z' },
+  { k: 'pB', base: GOLD, swap: BLUE, bar: true, anim: 'kasha-pump .9s .14s', delay: 0.24, d: pill(463, 800, 191, 214) },
+  {
+    k: 'aL', base: GOLD, swap: BLUE, bar: false, anim: 'kasha-fly 1.1s 0s', delay: 0.5,
+    d: 'M722,685L995,862C1045,895 1048,960 1000,1010C960,1048 900,1045 865,1018L555,775C600,740 660,712 722,685Z'
+  },
+  {
+    k: 'fo', base: FOLD, swap: FOLD_GOLD, bar: false, anim: 'kasha-fly 1.1s 0s', delay: 0.5,
+    d: 'M463,730C470,650 530,580 595,535C580,570 590,590 610,610C645,645 690,665 722,685C660,712 600,735 555,775C500,815 463,860 463,900Z'
+  },
+  {
+    k: 'aU', base: BLUE, swap: GOLD, bar: false, anim: 'kasha-fly 1.1s 0s', delay: 0.5,
+    d: 'M595,535L671,475L920,290C975,245 1045,255 1085,300C1115,340 1110,420 1055,458C960,527 840,610 722,685C690,662 645,640 610,610C590,590 580,570 595,535Z'
+  }
+]
+
+const EASE = 'cubic-bezier(.34,1.56,.64,1)'
+
+/**
+ * The K mark. With `animate` on, it plays "Takeoff" (2b): the bars pump
+ * from the bottom while the arrow flies out the top-right and comes back
+ * from below with blue and gold swapped.
+ */
+export function Logo({ size = 22, animate = false, className }: { size?: number; animate?: boolean; className?: string }) {
+  const uid = useId().replace(/:/g, '')
   return (
-    <svg width={size} height={size} viewBox="0 0 64 64" className={className} aria-hidden="true">
-      <rect x="12" y="5" width="40" height="8" rx="4" fill="currentColor" />
-      <rect x="12" y="19" width="28" height="8" rx="4" fill="currentColor" />
-      <path d="M6 34 H58 A26 26 0 0 1 6 34 Z" fill="var(--record)" />
+    <svg
+      height={size}
+      width={(size * 970) / 840}
+      viewBox="160 220 970 840"
+      className={className}
+      style={{ overflow: 'visible' }}
+      aria-hidden="true"
+    >
+      <defs>
+        {PARTS.map((p) => {
+          const [a, b] = animate ? p.swap : p.base
+          // Bars fade between colors; the arrow swaps instantly while it is out of view.
+          const transition = `stop-color ${p.bar ? 0.4 : 0.01}s ${p.delay}s`
+          return (
+            <linearGradient key={p.k} id={`${uid}${p.k}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" style={{ stopColor: a, transition }} />
+              <stop offset="1" style={{ stopColor: b, transition }} />
+            </linearGradient>
+          )
+        })}
+      </defs>
+      {PARTS.map((p) => (
+        <path
+          key={p.k}
+          d={p.d}
+          fill={`url(#${uid}${p.k})`}
+          className="kasha-logo-part"
+          style={{
+            transformBox: 'fill-box',
+            transformOrigin: p.bar ? 'bottom' : 'center',
+            animation: animate ? `${p.anim} ${EASE} both` : 'none'
+          }}
+        />
+      ))}
     </svg>
   )
 }

@@ -183,3 +183,29 @@
   height: 0;
   pointer-events: none;
 }
+
+/* Logo "Takeoff" (2b): bars pump, arrow flies off and back, name lifts. */
+@keyframes kasha-pump {
+  0%, 100% { transform: scaleY(1); }
+  25% { transform: scaleY(1.35); }
+  50% { transform: scaleY(0.8); }
+  75% { transform: scaleY(1.15); }
+}
+@keyframes kasha-fly {
+  0% { transform: translate(0, 0); opacity: 1; }
+  42% { transform: translate(220px, -220px); opacity: 0; }
+  50% { transform: translate(-220px, 220px); opacity: 0; }
+  100% { transform: translate(0, 0); opacity: 1; }
+}
+@keyframes kasha-lift {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+/* Brand gradient for small accent text, blue into gold like the mark. */
+.kasha-gradient-text {
+  background: linear-gradient(90deg, #0072ff, #00c6ff 45%, #ffa500);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}

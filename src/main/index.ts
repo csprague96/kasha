@@ -19,16 +19,40 @@ import {
 import { existsSync, writeFileSync } from 'node:fs'
 import { join, normalize, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { DetectedMeeting, Meeting, RecordingInfo, Settings, ShareOptions } from '@shared/types'
+import { countMatches, findPattern } from '@shared/text'
+import {
+  GENERIC_TITLE,
+  isSpeakerId,
+  normName,
+  type CalendarMatch,
+  type DetectedMeeting,
+  type LiveState,
+  type Meeting,
+  type RecordingInfo,
+  type ReplaceOptions,
+  type Settings,
+  type MeetingPatch,
+  type ShareOptions,
+  type SpeakerId,
+  type ToastState,
+  type TranscriptSegment
+} from '@shared/types'
 import { listActions, ReminderScheduler, setActionDone } from './actions'
+import { lookupMeeting } from './calendar'
 import { MeetingDetector } from './detector'
+import { getLive, startLive, takeLive, type LiveTranscriber } from './live'
 import { syncToObsidian } from './obsidian'
-import { enqueue, type PipelineEvents } from './pipeline'
+import { cleanText, enqueue, type PipelineEvents } from './pipeline'
 import { Recording, type Track } from './recorder'
 import { takeScreenshot } from './screenshot'
 import { copyToClipboard, emailDraft, saveMarkdown, savePdf } from './share'
-import { downloadWhisper, setupStatus } from './setup'
+import { redact } from './redact'
+import { downloadSpeech, setupStatus, speechReady } from './setup'
+import { syncVoices } from './speakers'
+import { whisperPrompt } from './speech'
 import * as store from './store'
+import { splitNote } from './summarizer'
+import * as voices from './voices'
 import { createBarWindow, createMainWindow, createToastWindow } from './windows'
 
 // Dev and testing: keep data in a separate folder so real notes aren't touched.
@@ -51,13 +75,18 @@ let toastWin: BrowserWindow | null = null
 let barWin: BrowserWindow | null = null
 let tray: Tray | null = null
 
-let detected: DetectedMeeting | null = null
+let toast: ToastState | null = null
 const dismissed = new Set<string>() // apps the user said "Not now" to, until that call ends
+/** Calendar lookups started when a call was detected, by app, so recording can reuse them. */
+const lookups = new Map<string, Promise<CalendarMatch | null>>()
 
 interface ActiveRecording extends RecordingInfo {
   app: Meeting['app']
   rec: Recording
+  live: LiveTranscriber | null
   stopping: boolean
+  /** The user said yes to the prompt (not started by a rule or by hand). */
+  accepted: boolean
 }
 let recording: ActiveRecording | null = null
 
@@ -111,10 +140,80 @@ function isOwnWindow(wc: WebContents | null): boolean {
   return !!wc && BrowserWindow.getAllWindows().some((w) => w.webContents.id === wc.id)
 }
 
+const hasSummary = (id: string) => splitNote(store.readNote(id)).generated !== ''
+
+/** Adds a correction to Names and terms, so future transcripts get it right. */
+function rememberTerm(heard: string, term: string): void {
+  const t = term.trim()
+  const h = heard.trim()
+  if (!t || !h) return
+  const vocab = store.getSettings().vocabulary
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
+  const entry = vocab.find((v) => same(v.term, t))
+  const next = entry
+    ? vocab.map((v) => (v === entry && !same(h, t) && !v.heardAs.some((x) => same(x, h)) ? { ...v, heardAs: [...v.heardAs, h] } : v))
+    : [...vocab, { term: t, heardAs: same(h, t) ? [] : [h] }]
+  broadcast('settings-changed', store.setSettings({ vocabulary: next }))
+}
+
 function appendToNote(id: string, fragment: string): void {
   const cur = store.readNote(id).replace(/\s+$/, '')
   store.writeNote(id, cur ? `${cur}\n\n${fragment}\n` : `${fragment}\n`)
   broadcast('note-appended', id, fragment)
+}
+
+// ---------- Recording rules ----------
+
+const ruleSettings = () => store.getSettings().recording
+const listHas = (list: string[], v: string) => list.some((x) => normName(x) === normName(v))
+const wordsOf = (s: string) => new Set(normName(s).split(/[^\p{L}\p{N}'-]+/u).filter(Boolean))
+
+/** Every word of the person's name is in the text, so "Sam Lee" matches "Lee, Sam" and "Huddle with Sam Lee". */
+function mentions(text: string, person: string): boolean {
+  const have = wordsOf(text)
+  const want = [...wordsOf(person)]
+  return want.length > 0 && want.every((w) => have.has(w))
+}
+
+/** The call is one the user always records: by its title, or a person in its title or invite list. */
+function alwaysRecords(title: string, match?: CalendarMatch | null): boolean {
+  const r = ruleSettings()
+  const titles = [title, match?.subject ?? ''].filter((t) => t && !GENERIC_TITLE.test(t))
+  if (titles.some((t) => listHas(r.meetings, t))) return true
+  return r.people.some((p) => mentions(title, p) || !!match?.attendees.some((a) => mentions(a, p)))
+}
+
+/** The title a recurring-meeting rule would use: the window title, or the calendar subject when that's generic. */
+function ruleTitle(title: string, match?: CalendarMatch | null): string | null {
+  if (!GENERIC_TITLE.test(title)) return title
+  return match?.subject && !GENERIC_TITLE.test(match.subject) ? match.subject : null
+}
+
+/** A past meeting had the same title. Call before creating this one's note. */
+function seenBefore(title: string): boolean {
+  if (GENERIC_TITLE.test(title)) return false
+  return store.listMeetings().some((m) => normName(m.detectedTitle ?? m.title) === normName(title))
+}
+
+/** Whether to offer "always record this one": not already a rule, and not turned down before. */
+function worthOffering(title: string | null): title is string {
+  if (!title) return false
+  const r = ruleSettings()
+  return !listHas(r.meetings, title) && !listHas(r.declined, title)
+}
+
+function addToRule(key: 'meetings' | 'declined', title: string): void {
+  const r = ruleSettings()
+  if (listHas(r[key], title)) return
+  broadcast('settings-changed', store.setSettings({ recording: { ...r, [key]: [...r[key], title] } }))
+}
+
+function liveState(): LiveState {
+  return recording?.live?.state() ?? { available: false, paused: null }
+}
+
+function setLivePaused(paused: boolean): void {
+  recording?.live?.setPaused(paused)
 }
 
 // ---------- Tray ----------
@@ -135,6 +234,13 @@ function refreshTray(): void {
       recording
         ? { label: 'Stop recording', click: () => stopRecording() }
         : { label: 'Start recording', click: () => void startRecording() },
+      ...(recording?.live
+        ? [
+            liveState().paused === 'user'
+              ? { label: 'Resume transcribing', click: () => setLivePaused(false) }
+              : { label: 'Pause transcribing', click: () => setLivePaused(true) }
+          ]
+        : []),
       { label: 'Actions', click: () => showMain({ actions: true }) },
       { label: 'Settings', click: () => showMain({ settings: true }) },
       { type: 'separator' },
@@ -145,25 +251,55 @@ function refreshTray(): void {
 
 // ---------- Recording ----------
 
-async function startRecording(meetingId?: string, from?: DetectedMeeting): Promise<void> {
+interface StartOptions {
+  /** Started by a rule or by the "always" setting, without asking. */
+  auto?: boolean
+  /** The user said yes to the prompt. */
+  accepted?: boolean
+}
+
+async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: StartOptions = {}): Promise<void> {
   if (recording) return
   let meeting = meetingId ? store.getMeeting(meetingId) : null
-  if (!meeting) meeting = store.createMeeting({ title: from?.title ?? 'New note', app: from?.app ?? 'manual' })
+  if (!meeting) {
+    meeting = store.createMeeting({ title: from?.title ?? 'New note', app: from?.app ?? 'manual' })
+    if (from) meeting = store.updateMeeting(meeting.id, { detectedTitle: from.title })
+  }
   const startedAt = Date.now()
   meeting = store.updateMeeting(meeting.id, {
     status: 'recording',
     recordingStartedAt: new Date(startedAt).toISOString(),
     error: undefined
   })
-  recording = {
-    meetingId: meeting.id,
-    title: meeting.title,
-    startedAt,
-    app: meeting.app,
-    rec: new Recording(store.paths.meeting(meeting.id)),
-    stopping: false
-  }
+  const rec = new Recording(store.paths.meeting(meeting.id))
+  const settings = store.getSettings()
+  const id = meeting.id
+  const live =
+    settings.liveTranscription && speechReady()
+      ? startLive(
+          id,
+          rec.dir,
+          whisperPrompt(settings),
+          (segs) => broadcast('transcript-live', id, segs.map((s) => ({ ...s, text: cleanText(s.text) }))),
+          () => store.getSettings().recording.pauseWhenLowMemory,
+          (state) => {
+            if (recording?.meetingId !== id) return
+            broadcast('live-state', state)
+            refreshTray()
+          }
+        )
+      : null
+  recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted }
   closeToast()
+  if (opts.auto && Notification.isSupported()) {
+    const n = new Notification({ title: 'Recording', body: `${meeting.title}. Kasha started automatically. Stop it from the bar.`, silent: true })
+    n.on('click', () => showMain({ meetingId: id }))
+    n.show()
+  }
+  // Who was invited: for naming speakers and the summary.
+  const calendar = (from && lookups.get(from.app)) ?? (settings.recording.lookupAttendees ? lookupMeeting(meeting.title) : null)
+  if (from) lookups.delete(from.app)
+  if (calendar) void calendar.then((match) => onCalendar(id, match))
   barWin = createBarWindow()
   barWin.on('closed', () => (barWin = null))
   refreshTray()
@@ -209,31 +345,69 @@ function finalizeRecording(): void {
   refreshTray()
   broadcast('recording-changed', null)
   broadcast('meetings-changed')
+  // The pipeline finishes the live transcript, if there is one.
   if (tracks.length) enqueue(meetingId, pipelineEvents)
+  else takeLive(meetingId)?.stop()
 }
 
 // ---------- Meeting detection ----------
 
+/** Stores the invite list and, for a generic window title, the calendar subject. */
+function onCalendar(id: string, match: CalendarMatch | null): void {
+  const cur = store.getMeeting(id)
+  if (!match || !cur) return
+  const patch: Partial<Meeting> = { attendees: match.attendees }
+  if (match.subject && GENERIC_TITLE.test(cur.title)) patch.title = match.subject.slice(0, 200)
+  store.updateMeeting(id, patch)
+  broadcast('meetings-changed')
+  if (recording?.meetingId !== id) return
+  if (patch.title) {
+    recording.title = patch.title
+    broadcast('recording-changed', recordingInfo())
+    refreshTray()
+  }
+  // A recurring series the user said yes to: offer to always record it.
+  const title = ruleTitle(cur.detectedTitle ?? cur.title, match)
+  if (recording.accepted && match.recurring && !toast && worthOffering(title)) showToast({ kind: 'recurring', title })
+}
+
 function closeToast(): void {
   if (toastWin && !toastWin.isDestroyed()) toastWin.destroy()
   toastWin = null
-  detected = null
+  toast = null
 }
 
-detector.on('start', (m: DetectedMeeting) => {
-  if (recording || dismissed.has(m.app) || !store.getSettings().setupComplete) return
-  detected = m
-  if (toastWin && !toastWin.isDestroyed()) toastWin.destroy()
+function showToast(state: ToastState, ms = state.kind === 'detected' ? 90_000 : 30_000): void {
+  closeToast()
+  toast = state
   toastWin = createToastWindow()
   toastWin.on('closed', () => (toastWin = null))
   setTimeout(() => {
-    if (detected === m) closeToast()
-  }, 90_000)
-})
+    if (toast === state) closeToast()
+  }, ms)
+}
+
+detector.on('start', (m: DetectedMeeting) => void onDetected(m))
+
+async function onDetected(m: DetectedMeeting): Promise<void> {
+  const settings = store.getSettings()
+  if (recording || dismissed.has(m.app) || !settings.setupComplete) return
+  const r = settings.recording
+  // Started now so the invite list is ready by the time it's needed.
+  const calendar = r.lookupAttendees ? lookupMeeting(m.title) : Promise.resolve(null)
+  lookups.set(m.app, calendar)
+  if (r.mode === 'always' || alwaysRecords(m.title)) return startRecording(undefined, m, { auto: true })
+  if (r.mode === 'ask') showToast({ kind: 'detected', meeting: m })
+  // Someone on the always-record list may be in the invite.
+  const match = await calendar
+  if (recording || dismissed.has(m.app) || !detector.isLive(m.app)) return
+  if (alwaysRecords(m.title, match)) await startRecording(undefined, m, { auto: true })
+}
 
 detector.on('end', (appName: string) => {
   dismissed.delete(appName)
-  if (detected?.app === appName) closeToast()
+  lookups.delete(appName)
+  if (toast?.kind === 'detected' && toast.meeting.app === appName) closeToast()
   // The call ended: stop the recording it started.
   if (recording && recording.app === appName) stopRecording()
 })
@@ -251,17 +425,43 @@ function registerIpc(): void {
   handle('meetings:list', () => store.listMeetings())
   handle('meetings:get', (id: string) => {
     const meeting = store.getMeeting(id)
-    return meeting ? { meeting, note: store.readNote(id), transcript: store.readTranscript(id) } : null
+    if (!meeting) return null
+    const live = getLive(id)
+    const transcript = live ? live.current().map((s) => ({ ...s, text: cleanText(s.text) })) : store.readTranscript(id)
+    return { meeting, note: store.readNote(id), transcript }
   })
   handle('meetings:create', () => {
     const m = store.createMeeting({ title: 'New note', app: 'manual' })
     broadcast('meetings-changed')
     return m
   })
-  handle('meetings:update', (id: string, patch: Partial<Pick<Meeting, 'title' | 'tags'>>) => {
+  handle('meetings:update', (id: string, patch: MeetingPatch) => {
+    const before = store.getMeeting(id)
     const clean: Partial<Meeting> = {}
     if (typeof patch.title === 'string') clean.title = patch.title.trim().slice(0, 200) || 'Untitled'
     if (Array.isArray(patch.tags)) clean.tags = patch.tags.map(String).slice(0, 20)
+    if (patch.speakers && typeof patch.speakers === 'object') {
+      const names: NonNullable<Meeting['speakers']> = {}
+      for (const [k, v] of Object.entries(patch.speakers)) {
+        if (isSpeakerId(k) && typeof v === 'string' && v.trim()) names[k] = v.trim().slice(0, 60)
+      }
+      clean.speakers = names
+      // The summary still uses the old names until it's rewritten.
+      if (hasSummary(id)) clean.summaryOutdated = true
+      // Naming a speaker teaches Kasha their voice for next time.
+      syncVoices(id, before?.speakers, names)
+      // A guess the user renamed or cleared is theirs now.
+      const guesses = { ...before?.speakerGuesses }
+      for (const k of Object.keys(guesses) as SpeakerId[]) if (names[k] !== before?.speakers?.[k]) delete guesses[k]
+      clean.speakerGuesses = guesses
+    }
+    const confirm = patch.confirmSpeaker
+    if (isSpeakerId(confirm) && before?.speakerGuesses?.[confirm] && before.speakers?.[confirm]) {
+      const { [confirm]: _, ...rest } = before.speakerGuesses
+      clean.speakerGuesses = rest
+      // Now it's confirmed, the voice is learned like any name the user gave.
+      syncVoices(id, { ...before.speakers, [confirm]: undefined }, before.speakers)
+    }
     const m = store.updateMeeting(id, clean)
     if (recording?.meetingId === id && clean.title) {
       recording.title = clean.title
@@ -279,6 +479,50 @@ function registerIpc(): void {
     const name = `image-${Date.now()}.${safeExt}`
     writeFileSync(join(store.paths.meeting(id), 'attachments', name), Buffer.from(data))
     return `attachments/${name}`
+  })
+  handle('meetings:saveTranscript', (id: string, segs: TranscriptSegment[]) => {
+    const m = store.getMeeting(id)
+    if (!m || m.status === 'recording' || m.status === 'transcribing' || m.status === 'separating') throw new Error('The transcript is still being written.')
+    if (!Array.isArray(segs)) return
+    const before = store.readTranscript(id)
+    const next = segs
+      .filter((s) => s && Number.isFinite(s.start) && Number.isFinite(s.end) && isSpeakerId(s.speaker) && typeof s.text === 'string')
+      .map((s) => ({ start: s.start, end: s.end, speaker: s.speaker, text: redact(s.text.slice(0, 5000)) }))
+    store.writeTranscript(id, next)
+    const moved = next.length !== before.length || next.some((s, i) => s.speaker !== before[i].speaker)
+    if (moved && hasSummary(id)) store.updateMeeting(id, { summaryOutdated: true })
+    broadcast('meetings-changed')
+  })
+  handle('meetings:replace', (id: string, find: string, replacement: string, o: ReplaceOptions) => {
+    const m = store.getMeeting(id)
+    if (!m || m.status === 'recording' || m.status === 'transcribing' || m.status === 'separating') throw new Error('The transcript is still being written.')
+    const re = findPattern(String(find), { matchCase: !!o?.matchCase })
+    if (!re) return { transcript: 0, notes: 0 }
+    const to = redact(String(replacement))
+    let inTranscript = 0
+    const transcript = store.readTranscript(id).map((s) => {
+      const n = countMatches(s.text, re)
+      inTranscript += n
+      return n ? { ...s, text: s.text.replace(re, () => to) } : s
+    })
+    if (inTranscript) store.writeTranscript(id, transcript)
+    let inNotes = 0
+    if (o?.notes) {
+      const note = store.readNote(id)
+      inNotes = countMatches(note, re)
+      if (inNotes) store.writeNote(id, note.replace(re, () => to))
+    } else if (inTranscript && hasSummary(id)) {
+      store.updateMeeting(id, { summaryOutdated: true })
+    }
+    if (o?.remember) rememberTerm(String(find), to)
+    broadcast('meetings-changed')
+    if (inNotes) broadcast('actions-changed')
+    return { transcript: inTranscript, notes: inNotes }
+  })
+  handle('meetings:resummarize', (id: string) => {
+    const m = store.getMeeting(id)
+    if (!m || (m.status !== 'ready' && m.status !== 'failed') || !store.readTranscript(id).length) return
+    enqueue(id, pipelineEvents)
   })
   handle('meetings:delete', (id: string) => {
     if (recording?.meetingId === id) return
@@ -331,8 +575,11 @@ function registerIpc(): void {
   })
   handle('setup:status', () => setupStatus())
   handle('setup:downloadWhisper', () =>
-    downloadWhisper(async () => broadcast('setup-changed', await setupStatus()))
+    downloadSpeech(async () => broadcast('setup-changed', await setupStatus()))
   )
+
+  handle('voices:list', () => voices.list())
+  handle('voices:remove', (name: string) => voices.remove(String(name)))
   handle('setup:pickFolder', async () => {
     const opts: Electron.OpenDialogOptions = { properties: ['openDirectory', 'createDirectory'] }
     const r = mainWin ? await dialog.showOpenDialog(mainWin, opts) : await dialog.showOpenDialog(opts)
@@ -341,24 +588,41 @@ function registerIpc(): void {
 
   ipcMain.on('win:openMeeting', (e, id: string) => isOwnWindow(e.sender) && showMain({ meetingId: id }))
 
-  // Toast
-  handle('toast:detected', () => detected)
-  ipcMain.on('toast:accept', () => {
-    const d = detected
+  // Toast. In the recurring prompt, accept is "Always record" and dismiss is "Just this once".
+  handle('toast:state', () => toast)
+  ipcMain.on('toast:accept', async (e) => {
+    if (!isOwnWindow(e.sender)) return
+    const t = toast
     closeToast()
-    if (d) void startRecording(undefined, d)
+    if (t?.kind === 'recurring') return addToRule('meetings', t.title)
+    if (t?.kind !== 'detected') return
+    const d = t.meeting
+    const recurring = seenBefore(d.title)
+    await startRecording(undefined, d, { accepted: true })
+    if (recurring && worthOffering(d.title)) showToast({ kind: 'recurring', title: d.title })
   })
-  ipcMain.on('toast:dismiss', () => {
-    if (detected) dismissed.add(detected.app)
+  ipcMain.on('toast:dismiss', (e) => {
+    if (!isOwnWindow(e.sender)) return
+    const t = toast
     closeToast()
+    if (t?.kind === 'detected') dismissed.add(t.meeting.app)
+    if (t?.kind === 'recurring') addToRule('declined', t.title)
   })
+
+  handle('calendar:check', () => lookupMeeting('Teams meeting'))
 
   // Recording bar
   handle('bar:info', () => recordingInfo())
+  handle('bar:live', () => liveState())
+  ipcMain.on('bar:setPaused', (e, paused: boolean) => {
+    if (e.sender.id === barWin?.webContents.id) setLivePaused(!!paused)
+  })
   ipcMain.on('bar:chunk', (e, track: Track, pcm: ArrayBuffer) => {
     if (!recording || e.sender.id !== barWin?.webContents.id) return
     if (track !== 'mic' && track !== 'sys') return
-    recording.rec.write(track, Buffer.from(pcm))
+    const buf = Buffer.from(pcm)
+    recording.rec.write(track, buf)
+    recording.live?.wrote(track, buf.length)
   })
   ipcMain.on('bar:captureStarted', (_e, tracks: { mic: boolean; sys: boolean }) => {
     if (recording && !tracks.mic && !tracks.sys) {
@@ -413,6 +677,7 @@ app.on('before-quit', () => {
     // Close files cleanly so the audio can still be processed next time.
     const { meetingId, rec } = recording
     rec.close()
+    takeLive(meetingId)?.stop()
     store.updateMeeting(meetingId, { status: 'failed', error: 'Kasha quit during recording. Select Retry to process the audio.', recordingEndedAt: new Date().toISOString() })
     recording = null
   }
@@ -444,7 +709,7 @@ app.whenReady().then(() => {
   for (const m of store.listMeetings()) {
     if (m.status === 'recording') {
       store.updateMeeting(m.id, { status: 'failed', error: 'Recording was interrupted. Select Retry to process the audio.' })
-    } else if (m.status === 'transcribing' || m.status === 'summarizing') {
+    } else if (m.status === 'transcribing' || m.status === 'separating' || m.status === 'summarizing') {
       enqueue(m.id, pipelineEvents)
     }
   }

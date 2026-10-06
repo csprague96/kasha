@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
-import { APP_LABELS, type Meeting, type Settings, type TranscriptSegment } from '@shared/types'
+import { APP_LABELS, speakerName, type Meeting, type Settings, type TranscriptSegment } from '@shared/types'
 import { paths } from './store'
 
 const p2 = (n: number) => String(n).padStart(2, '0')
@@ -58,7 +58,7 @@ export function buildMarkdown(
 
   const out = fm.join('\n') + body.trim() + '\n'
   if (!opts.includeTranscript || transcript.length === 0) return out
-  const lines = transcript.map((t) => `> \`${clock(t.start)}\` **${t.speaker === 'you' ? 'You' : 'Others'}:** ${t.text}`)
+  const lines = transcript.map((t) => `> \`${clock(t.start)}\` **${speakerName(t.speaker, m.speakers)}:** ${t.text}`)
   return `${out}\n> [!quote]- Transcript\n${lines.join('\n>\n')}\n`
 }
 

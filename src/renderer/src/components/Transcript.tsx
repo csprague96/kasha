@@ -1,0 +1,479 @@
+import { Check, Pencil, Replace, X } from 'lucide-react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { countMatches, findPattern } from '@shared/text'
+import { speakerName, type Meeting, type SpeakerId, type TranscriptSegment } from '@shared/types'
+import { clock, cn } from '@/lib/utils'
+import { Button } from './ui/button'
+import { Input } from './ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
+
+interface Props {
+  meeting: Meeting
+  segments: TranscriptSegment[]
+  note: string
+  live: boolean // lines are still arriving
+  liveEnabled: boolean
+  /** Saves edited lines. Undefined while the transcript can't be changed. */
+  onSave?: (segs: TranscriptSegment[]) => void
+  /** The transcript and note changed on disk and should be reloaded. */
+  onReplaced: () => void
+}
+
+function highlight(text: string, re: RegExp | null): ReactNode {
+  if (!re) return text
+  const out: ReactNode[] = []
+  let last = 0
+  for (const m of text.matchAll(re)) {
+    out.push(text.slice(last, m.index))
+    out.push(
+      <mark key={m.index} className="rounded-sm bg-primary/15 text-foreground">
+        {m[0]}
+      </mark>
+    )
+    last = m.index + m[0].length
+  }
+  out.push(text.slice(last))
+  return out
+}
+
+// ---------- Speakers ----------
+
+function SpeakerChip({ id, meeting }: { id: SpeakerId; meeting: Meeting }) {
+  const [editing, setEditing] = useState(false)
+  const name = speakerName(id, meeting.speakers)
+  const [value, setValue] = useState(name)
+  useEffect(() => setValue(name), [name])
+
+  const commit = () => {
+    setEditing(false)
+    const v = value.trim()
+    const next = { ...meeting.speakers }
+    // Clearing the name, or typing the default, goes back to "Speaker 2".
+    if (v && v !== speakerName(id)) next[id] = v
+    else delete next[id]
+    if ((next[id] ?? '') !== (meeting.speakers?.[id] ?? '')) void window.kasha.updateMeeting(meeting.id, { speakers: next })
+  }
+
+  if (editing) {
+    // People invited to the meeting who haven't been given to a speaker yet.
+    const listId = `invited-${id}`
+    const named = new Set(Object.values(meeting.speakers ?? {}))
+    const invited = (meeting.attendees ?? []).filter((a) => !named.has(a))
+    return (
+      <>
+        {invited.length > 0 && (
+          <datalist id={listId}>
+            {invited.map((a) => (
+              <option key={a} value={a} />
+            ))}
+          </datalist>
+        )}
+        <input
+          autoFocus
+          list={invited.length ? listId : undefined}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onFocus={(e) => e.currentTarget.select()}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.currentTarget.blur()
+            if (e.key === 'Escape') {
+              setValue(name)
+              setEditing(false)
+            }
+          }}
+          aria-label={`Name for ${name}`}
+          placeholder={speakerName(id)}
+          className="h-7 w-40 rounded-md border border-primary bg-surface px-2 text-[13px] focus-visible:outline-offset-0"
+        />
+      </>
+    )
+  }
+  const guess = meeting.speakerGuesses?.[id]
+  if (guess) {
+    // Named from the conversation: shown as a question until the user says yes or no.
+    const clear = () => {
+      const next = { ...meeting.speakers }
+      delete next[id]
+      void window.kasha.updateMeeting(meeting.id, { speakers: next })
+    }
+    return (
+      <span className="inline-flex h-7 items-center rounded-md border border-dashed border-border bg-surface text-[13px]">
+        <button
+          onClick={() => setEditing(true)}
+          title={`Guessed from the conversation${guess.evidence ? `: ${guess.evidence}` : ''}. Select to rename.`}
+          className="inline-flex h-full items-center gap-1 rounded-l-md px-2 hover:bg-sidebar"
+        >
+          {name}
+          <span className="text-muted">?</span>
+        </button>
+        <button
+          onClick={() => void window.kasha.updateMeeting(meeting.id, { confirmSpeaker: id })}
+          aria-label={`Yes, this is ${name}`}
+          title={`Yes, this is ${name}`}
+          className="inline-flex h-full items-center border-l border-border px-1.5 hover:bg-sidebar"
+        >
+          <Check className="size-3.5 text-ok" />
+        </button>
+        <button
+          onClick={clear}
+          aria-label={`Not ${name}`}
+          title={`Not ${name}`}
+          className="inline-flex h-full items-center rounded-r-md border-l border-border px-1.5 hover:bg-sidebar"
+        >
+          <X className="size-3.5 text-muted" />
+        </button>
+      </span>
+    )
+  }
+  return (
+    <button
+      onClick={() => setEditing(true)}
+      title="Rename everywhere in this transcript"
+      className="group inline-flex h-7 items-center gap-1.5 rounded-md border border-border bg-surface px-2 text-[13px] hover:bg-sidebar"
+    >
+      {name}
+      <Pencil className="size-3 text-muted opacity-60 group-hover:opacity-100" />
+    </button>
+  )
+}
+
+/** Moves one line to a different speaker, or to someone new. */
+function SpeakerPicker({
+  seg,
+  meeting,
+  speakers,
+  show,
+  onPick
+}: {
+  seg: TranscriptSegment
+  meeting: Meeting
+  speakers: SpeakerId[]
+  show: boolean
+  onPick?: (id: SpeakerId) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const guessed = !!meeting.speakerGuesses?.[seg.speaker]
+  const label = (
+    <span className={cn('block truncate', seg.speaker === 'you' ? 'font-medium' : 'text-muted')} title={speakerName(seg.speaker, meeting.speakers)}>
+      {speakerName(seg.speaker, meeting.speakers)}
+      {guessed && '?'}
+    </span>
+  )
+  // Continuation lines hide the name until hovered, so turns are easy to scan.
+  const visibility = show ? '' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
+  if (!onPick) return <span className={cn('self-start pt-[1px] text-[13px]', visibility)}>{label}</span>
+  const next = Math.max(0, ...speakers.map((s) => (s.startsWith('s') ? Number(s.slice(1)) : 0))) + 1
+  const pick = (id: SpeakerId) => {
+    setOpen(false)
+    if (id !== seg.speaker) onPick(id)
+  }
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        className={cn('min-w-0 self-start rounded pt-[1px] text-left text-[13px] hover:underline', visibility)}
+        title="Change who said this"
+      >
+        {label}
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-48">
+        <p className="px-2 pt-1 pb-1.5 text-xs text-muted">Who said this?</p>
+        {speakers.map((id) => (
+          <button
+            key={id}
+            onClick={() => pick(id)}
+            className={cn('flex w-full rounded-md px-2 py-1.5 text-left hover:bg-foreground/5', id === seg.speaker && 'font-medium')}
+          >
+            {speakerName(id, meeting.speakers)}
+          </button>
+        ))}
+        {next < 100 && (
+          <button onClick={() => pick(`s${next}`)} className="flex w-full rounded-md px-2 py-1.5 text-left text-muted hover:bg-foreground/5">
+            Someone else
+          </button>
+        )}
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+// ---------- Lines ----------
+
+function LineText({ text, re, onSave }: { text: string; re: RegExp | null; onSave?: (text: string) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(text)
+  useEffect(() => setValue(text), [text])
+
+  if (!editing || !onSave) {
+    return (
+      <span
+        className={cn('text-[15px]', onSave && 'cursor-text rounded hover:bg-foreground/[0.04]')}
+        onClick={() => onSave && setEditing(true)}
+        title={onSave ? 'Select to edit' : undefined}
+      >
+        {highlight(text, re)}
+      </span>
+    )
+  }
+  const commit = () => {
+    setEditing(false)
+    const v = value.replace(/\s+/g, ' ').trim()
+    if (v && v !== text) onSave(v)
+    else setValue(text)
+  }
+  return (
+    <textarea
+      autoFocus
+      rows={1}
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          e.currentTarget.blur()
+        }
+        if (e.key === 'Escape') {
+          setValue(text)
+          setEditing(false)
+        }
+      }}
+      aria-label="Edit line"
+      className="-mx-1 -my-0.5 block w-full resize-none rounded-md bg-surface px-1 py-0.5 text-[15px] leading-relaxed outline-2 outline-primary [field-sizing:content]"
+    />
+  )
+}
+
+// ---------- Find and replace ----------
+
+function FindReplace({
+  meeting,
+  find,
+  setFind,
+  matchCase,
+  setMatchCase,
+  inTranscript,
+  inNotes,
+  canReplace,
+  onClose,
+  onReplaced
+}: {
+  meeting: Meeting
+  find: string
+  setFind: (v: string) => void
+  matchCase: boolean
+  setMatchCase: (v: boolean) => void
+  inTranscript: number
+  inNotes: number
+  canReplace: boolean
+  onClose: () => void
+  onReplaced: () => void
+}) {
+  const [replace, setReplace] = useState('')
+  const [notes, setNotes] = useState(true)
+  const [remember, setRemember] = useState(false)
+  const [result, setResult] = useState<string | null>(null)
+  const findRef = useRef<HTMLInputElement>(null)
+  useEffect(() => findRef.current?.focus(), [])
+
+  const total = inTranscript + (notes ? inNotes : 0)
+  const run = async () => {
+    const r = await window.kasha.replaceText(meeting.id, find, replace, { matchCase, notes, remember })
+    const parts = [`${r.transcript} in the transcript`]
+    if (notes) parts.push(`${r.notes} in notes`)
+    setResult(`Replaced ${parts.join(' and ')}.${remember ? ' Future transcripts will use it too.' : ''}`)
+    setFind('')
+    onReplaced()
+  }
+  const counts = find.trim()
+    ? [`${inTranscript} in transcript`, inNotes ? `${inNotes} in notes` : ''].filter(Boolean).join(', ')
+    : ''
+
+  return (
+    <div
+      className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-3"
+      onKeyDown={(e) => e.key === 'Escape' && onClose()}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          ref={findRef}
+          value={find}
+          onChange={(e) => {
+            setFind(e.target.value)
+            setResult(null)
+          }}
+          placeholder="Find"
+          aria-label="Find"
+          className="h-8 w-48"
+        />
+        <Input
+          value={replace}
+          onChange={(e) => setReplace(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && canReplace && total > 0 && replace.trim() && void run()}
+          placeholder="Replace with"
+          aria-label="Replace with"
+          disabled={!canReplace}
+          className="h-8 w-48"
+        />
+        <Button size="sm" variant="primary" disabled={!canReplace || !total || !replace.trim()} onClick={() => void run()}>
+          Replace all
+        </Button>
+        <span className="tabular text-xs text-muted" role="status">
+          {result ?? counts}
+        </span>
+        <Button variant="ghost" size="icon" className="ml-auto" aria-label="Close find and replace" onClick={onClose}>
+          <X className="text-muted" />
+        </Button>
+      </div>
+      <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-[13px]">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" className="size-4 accent-[var(--primary)]" checked={matchCase} onChange={(e) => setMatchCase(e.target.checked)} />
+          Match case
+        </label>
+        <label className="flex items-center gap-2 has-[:disabled]:opacity-50">
+          <input type="checkbox" className="size-4 accent-[var(--primary)]" checked={notes} disabled={!canReplace} onChange={(e) => setNotes(e.target.checked)} />
+          Also in notes
+        </label>
+        <label className="flex items-center gap-2 has-[:disabled]:opacity-50" title="Adds it to Names and terms in Settings">
+          <input type="checkbox" className="size-4 accent-[var(--primary)]" checked={remember} disabled={!canReplace} onChange={(e) => setRemember(e.target.checked)} />
+          Fix in future meetings too
+        </label>
+      </div>
+      {!canReplace && <p className="text-xs text-muted">You can replace text once the transcript is finished.</p>}
+    </div>
+  )
+}
+
+// ---------- Transcript ----------
+
+function useStickToBottom(dep: unknown, active: boolean) {
+  const end = useRef<HTMLDivElement>(null)
+  const wasAtBottom = useRef(true)
+  // Measure before the new lines render, then follow along only if the user was at the end.
+  const container = () => {
+    let el = end.current?.parentElement ?? null
+    while (el && getComputedStyle(el).overflowY !== 'auto') el = el.parentElement
+    return el
+  }
+  useLayoutEffect(() => {
+    if (!active) return
+    const el = container()
+    if (el && wasAtBottom.current) el.scrollTop = el.scrollHeight
+  }, [dep, active])
+  useEffect(() => {
+    const el = container()
+    if (!el || !active) return
+    const onScroll = () => (wasAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80)
+    el.addEventListener('scroll', onScroll)
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [active])
+  return end
+}
+
+export function Transcript({ meeting, segments, note, live, liveEnabled, onSave, onReplaced }: Props) {
+  const [finding, setFinding] = useState(false)
+  const [find, setFind] = useState('')
+  const [matchCase, setMatchCase] = useState(false)
+  const end = useStickToBottom(segments.length, live)
+
+  const re = useMemo(() => (finding ? findPattern(find, { matchCase }) : null), [finding, find, matchCase])
+  const inTranscript = useMemo(() => segments.reduce((n, s) => n + countMatches(s.text, re), 0), [segments, re])
+  const inNotes = useMemo(() => countMatches(note, re), [note, re])
+
+  const speakers = useMemo(() => {
+    const seen: SpeakerId[] = []
+    for (const s of segments) if (!seen.includes(s.speaker)) seen.push(s.speaker)
+    // You first, then everyone else in the order they spoke.
+    return seen.sort((a, b) => Number(b === 'you') - Number(a === 'you'))
+  }, [segments])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'h')) {
+        e.preventDefault()
+        setFinding(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  if (!segments.length) {
+    const msg =
+      meeting.status === 'recording'
+        ? liveEnabled
+          ? 'Listening. Lines appear here about a minute after they’re said.'
+          : 'Recording. The transcript is created on this PC when the call ends.'
+        : meeting.status === 'transcribing' || meeting.status === 'separating'
+          ? 'Transcribing on this PC.'
+          : meeting.status === 'draft'
+            ? 'No recording for this note.'
+            : 'No speech was detected in the recording.'
+    return <p className="text-muted">{msg}</p>
+  }
+
+  const edit = (i: number, patch: Partial<TranscriptSegment>) =>
+    onSave?.(segments.map((s, j) => (j === i ? { ...s, ...patch } : s)))
+
+  return (
+    <div className="flex max-w-[80ch] flex-col gap-5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-xs text-muted">Speakers</span>
+        {speakers.map((id) => (
+          <SpeakerChip key={id} id={id} meeting={meeting} />
+        ))}
+        {!finding && (
+          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setFinding(true)} title="Find and replace (Ctrl+H)">
+            <Replace />
+            Find and replace
+          </Button>
+        )}
+      </div>
+
+      {live && (
+        <p className="-mt-2 inline-flex items-center gap-2 text-[13px] text-muted">
+          <span className="size-2 animate-pulse rounded-full bg-record" aria-hidden="true" />
+          Live. Lines appear about a minute after they’re said.
+        </p>
+      )}
+
+      {finding && (
+        <FindReplace
+          meeting={meeting}
+          find={find}
+          setFind={setFind}
+          matchCase={matchCase}
+          setMatchCase={setMatchCase}
+          inTranscript={inTranscript}
+          inNotes={inNotes}
+          canReplace={!!onSave}
+          onClose={() => {
+            setFinding(false)
+            setFind('')
+          }}
+          onReplaced={onReplaced}
+        />
+      )}
+
+      <ol className="flex flex-col gap-3">
+        {segments.map((s, i) => {
+          const turn = i === 0 || segments[i - 1].speaker !== s.speaker
+          return (
+            <li key={`${s.start}-${i}`} className={cn('group grid grid-cols-[52px_112px_1fr] gap-2 leading-relaxed', turn && i > 0 && 'mt-2')}>
+              <span className="tabular pt-[3px] font-mono text-xs text-muted">{clock(s.start)}</span>
+              <SpeakerPicker
+                seg={s}
+                meeting={meeting}
+                speakers={speakers}
+                show={turn}
+                onPick={onSave && ((speaker) => edit(i, { speaker }))}
+              />
+              <LineText text={s.text} re={re} onSave={onSave && ((text) => edit(i, { text }))} />
+            </li>
+          )
+        })}
+      </ol>
+      <div ref={end} />
+    </div>
+  )
+}
