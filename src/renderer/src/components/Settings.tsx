@@ -223,9 +223,13 @@ function NameList({ items, onChange, placeholder, label }: { items: string[]; on
 }
 
 const MODES: Array<{ value: SettingsT['recording']['mode']; label: string; hint: string }> = [
-  { value: 'ask', label: 'Ask each time', hint: 'A prompt in the corner when a call starts. Meetings and people below are recorded without asking.' },
-  { value: 'always', label: 'Record every call', hint: 'No prompt. The recording bar shows while Kasha records, and Stop ends it.' },
-  { value: 'rules', label: 'Only the meetings and people below', hint: 'No prompt for anything else. Start other recordings yourself.' }
+  {
+    value: 'ask',
+    label: 'Ask each time',
+    hint: 'A prompt in the corner when a call starts. Meetings and people under Always record are recorded without asking; meetings under Never record are left alone.'
+  },
+  { value: 'always', label: 'Record every call', hint: 'No prompt, except for meetings under Never record. The recording bar shows while Kasha records, and Stop ends it.' },
+  { value: 'rules', label: 'Only the meetings and people under Always record', hint: 'No prompt for anything else. Start other recordings yourself from New note.' }
 ]
 
 /** Runs the Outlook lookup once, so the user can see whether it works for them. */
@@ -432,6 +436,9 @@ export function Settings({ settings, onChange }: Props) {
         <Field group label="Always record these meetings" hint="Matched on the meeting’s title. When you record a recurring meeting, Kasha offers to add it here.">
           <NameList items={rec.meetings} onChange={(meetings) => void setRec({ meetings })} placeholder="Meeting title, e.g. Weekly product sync" label="New meeting title" />
         </Field>
+        <Field group label="Never record these meetings" hint="Not recorded and not asked about, whichever option is chosen above. The call prompt has a “Never record this meeting” link that adds to this list.">
+          <NameList items={rec.never} onChange={(never) => void setRec({ never })} placeholder="Meeting title, e.g. 1:1 with my manager" label="New meeting title never to record" />
+        </Field>
         {rec.declined.length > 0 && (
           <Field group label="Kasha won’t offer to always record" hint="You chose “Just this once” for these. Remove one to be asked again.">
             <NameList items={rec.declined} onChange={(declined) => void setRec({ declined })} label="Meeting title not to offer" />
@@ -526,8 +533,8 @@ export function Settings({ settings, onChange }: Props) {
           />
         )}
         <Toggle
-          label="Keep audio after transcribing"
-          hint="Off by default. Audio is deleted once the transcript is saved."
+          label="Keep audio for 7 days after transcribing"
+          hint="Off by default: audio is deleted as soon as the transcript is saved. On, it stays on this PC for a week so you can listen back, then goes. To keep a recording for good, use Save a copy on the note."
           checked={settings.keepAudio}
           onChange={(v) => onChange({ keepAudio: v })}
         />

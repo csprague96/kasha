@@ -1,3 +1,4 @@
+import { X } from 'lucide-react'
 import { useState } from 'react'
 import type { ActionGroup, ActionItem } from '@shared/types'
 import { cn } from '@/lib/utils'
@@ -7,6 +8,8 @@ interface Props {
   groups: ActionGroup[]
   onOpenMeeting: (id: string) => void
   onToggle: (item: ActionItem, done: boolean) => void
+  /** Takes the line out of the note: it wasn't really an action. */
+  onRemove: (item: ActionItem) => void
 }
 
 function todayIso(): string {
@@ -30,9 +33,9 @@ function Due({ item }: { item: ActionItem }) {
   return item.dueText ? <span className="text-muted">{item.dueText}</span> : null
 }
 
-function Row({ item, onToggle }: { item: ActionItem; onToggle: Props['onToggle'] }) {
+function Row({ item, onToggle, onRemove }: { item: ActionItem; onToggle: Props['onToggle']; onRemove: Props['onRemove'] }) {
   return (
-    <li className="flex items-start gap-3 py-1.5">
+    <li className="group -mx-2 flex items-start gap-3 rounded-md px-2 py-1.5 hover:bg-foreground/[0.03]">
       <input
         type="checkbox"
         checked={item.done}
@@ -49,6 +52,14 @@ function Row({ item, onToggle }: { item: ActionItem; onToggle: Props['onToggle']
           <Due item={item} />
         </span>
       </div>
+      <button
+        onClick={() => onRemove(item)}
+        aria-label={`Not an action: remove “${item.text}”`}
+        title="Not an action. Removes the line from the note."
+        className="mt-[2px] shrink-0 rounded p-0.5 text-muted opacity-0 group-hover:opacity-100 hover:bg-foreground/5 hover:text-foreground focus-visible:opacity-100"
+      >
+        <X className="size-3.5" />
+      </button>
     </li>
   )
 }
@@ -57,7 +68,7 @@ function Row({ item, onToggle }: { item: ActionItem; onToggle: Props['onToggle']
  * Open actions from every meeting, grouped by meeting. Your own come first;
  * everyone else's sit underneath so you can follow up on them.
  */
-export function ActionsView({ groups, onOpenMeeting, onToggle }: Props) {
+export function ActionsView({ groups, onOpenMeeting, onToggle, onRemove }: Props) {
   const [showDone, setShowDone] = useState(false)
 
   const visible = groups
@@ -101,7 +112,7 @@ export function ActionsView({ groups, onOpenMeeting, onToggle }: Props) {
           {g.mine.length > 0 && (
             <ul className="flex flex-col">
               {g.mine.map((i) => (
-                <Row key={`${i.index}-${i.raw}`} item={i} onToggle={onToggle} />
+                <Row key={`${i.index}-${i.raw}`} item={i} onToggle={onToggle} onRemove={onRemove} />
               ))}
             </ul>
           )}
@@ -110,7 +121,7 @@ export function ActionsView({ groups, onOpenMeeting, onToggle }: Props) {
               <div className="pt-2 text-xs text-muted">Others</div>
               <ul className="flex flex-col">
                 {g.others.map((i) => (
-                  <Row key={`${i.index}-${i.raw}`} item={i} onToggle={onToggle} />
+                  <Row key={`${i.index}-${i.raw}`} item={i} onToggle={onToggle} onRemove={onRemove} />
                 ))}
               </ul>
             </>

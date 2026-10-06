@@ -176,6 +176,8 @@ export interface Settings {
     declined: string[]
     /** People whose calls are always recorded: matched against the call's title and invite list. */
     people: string[]
+    /** Meeting titles never recorded and never asked about, whatever the mode. */
+    never: string[]
     /** Find the call in Outlook through Claude Code's Microsoft 365 connector, for attendee names. */
     lookupAttendees: boolean
     /** Hold off transcribing during a call while the PC is short of memory. Nothing is lost. */
@@ -203,7 +205,7 @@ export const DEFAULT_SETTINGS: Settings = {
   vocabulary: [],
   reminders: { enabled: true, time: '09:00' },
   detect: { teams: true, slack: true, ringcentral: true, zoom: true, browser: false },
-  recording: { mode: 'ask', meetings: [], declined: [], people: [], lookupAttendees: true, pauseWhenLowMemory: true },
+  recording: { mode: 'ask', meetings: [], declined: [], people: [], never: [], lookupAttendees: true, pauseWhenLowMemory: true },
   obsidian: {
     vault: '',
     folder: 'Meetings',
@@ -314,6 +316,12 @@ export interface UpdateStatus {
   message: string | null
   /** How much of the download is done, 0 to 100. */
   percent?: number
+}
+
+/** The recording still on disk for a meeting, and when Kasha will delete it. */
+export interface AudioInfo {
+  bytes: number
+  until: string // ISO
 }
 
 export interface AppInfo {

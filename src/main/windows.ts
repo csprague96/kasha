@@ -55,10 +55,9 @@ export function createMainWindow(hash = ''): BrowserWindow {
 }
 
 /** "Meeting detected" prompt, top-right. Shown without taking focus from the call. */
-export function createToastWindow(): BrowserWindow {
+export function createToastWindow(height = 156): BrowserWindow {
   const { workArea } = screen.getPrimaryDisplay()
   const width = 360
-  const height = 156
   const win = new BrowserWindow({
     ...base(),
     width,

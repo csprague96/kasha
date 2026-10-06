@@ -93,6 +93,12 @@ export function App() {
     )
     void window.kasha.setActionDone(item.meetingId, item.index, item.raw, done)
   }
+  const removeAction = (item: ActionItem) => {
+    setActions((gs) =>
+      gs.map((g) => (g.meeting.id !== item.meetingId ? g : { ...g, items: g.items.filter((i) => i.index !== item.index) })).filter((g) => g.items.length)
+    )
+    void window.kasha.removeAction(item.meetingId, item.index, item.raw)
+  }
 
   return (
     <div className="grid h-full grid-cols-[240px_1fr] max-[820px]:grid-cols-[200px_1fr]">
@@ -107,7 +113,7 @@ export function App() {
       <main className="min-w-0 overflow-y-auto">
         {view.kind === 'settings' && <Settings settings={settings} onChange={updateSettings} />}
         {view.kind === 'actions' && (
-          <ActionsView groups={actions} onToggle={toggleAction} onOpenMeeting={(id) => setView({ kind: 'note', id })} />
+          <ActionsView groups={actions} onToggle={toggleAction} onRemove={removeAction} onOpenMeeting={(id) => setView({ kind: 'note', id })} />
         )}
         {current && (
           <NoteView

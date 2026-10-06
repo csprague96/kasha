@@ -1,6 +1,6 @@
-import { ExternalLink, Loader2, RefreshCw, Trash2, X } from 'lucide-react'
+import { Download, ExternalLink, Loader2, RefreshCw, Trash2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import type { Meeting, RecordingInfo, Settings, TranscriptSegment } from '@shared/types'
+import type { AudioInfo, Meeting, RecordingInfo, Settings, TranscriptSegment } from '@shared/types'
 import { cn, hhmm, meetingMeta, timer } from '@/lib/utils'
 import { Attendees } from './Attendees'
 import { Editor } from './Editor'
@@ -162,6 +162,39 @@ function Notice({ meeting }: { meeting: Meeting }) {
   return null
 }
 
+/** The recording is still on this PC: when it goes, and how to keep or drop it. */
+function AudioNotice({ meeting, audio, onChanged }: { meeting: Meeting; audio: AudioInfo; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const until = new Date(audio.until)
+  const days = Math.max(0, Math.ceil((until.getTime() - Date.now()) / 86_400_000))
+  const when = days === 0 ? 'today' : days === 1 ? 'tomorrow' : `on ${until.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}`
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true)
+    try {
+      await fn()
+    } finally {
+      setBusy(false)
+      onChanged()
+    }
+  }
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md bg-foreground/5 px-3 py-2 text-[13px] text-muted">
+      <span>
+        The recording ({Math.max(1, Math.round(audio.bytes / 1_000_000))} MB) is kept on this PC and deleted {when}.
+      </span>
+      <span className="flex gap-1">
+        <Button variant="ghost" size="sm" disabled={busy} onClick={() => void run(() => window.kasha.saveAudio(meeting.id))} title="Copies the audio files to a folder you choose">
+          <Download />
+          Save a copy
+        </Button>
+        <Button variant="ghost" size="sm" disabled={busy} onClick={() => void run(() => window.kasha.deleteAudio(meeting.id))}>
+          Delete now
+        </Button>
+      </span>
+    </div>
+  )
+}
+
 function Tags({ meeting }: { meeting: Meeting }) {
   const [draft, setDraft] = useState('')
   const save = (tags: string[]) => void window.kasha.updateMeeting(meeting.id, { tags })
@@ -200,25 +233,29 @@ function Tags({ meeting }: { meeting: Meeting }) {
 export function NoteView(props: Props) {
   const { meeting } = props
   const [tab, setTab] = useState<Tab>('notes')
-  const [data, setData] = useState<{ note: string; transcript: TranscriptSegment[]; version: number } | null>(null)
+  const [data, setData] = useState<{ note: string; transcript: TranscriptSegment[]; audio: AudioInfo | null; version: number } | null>(null)
   const prevStatus = useRef(meeting.status)
 
   useEffect(() => {
-    void window.kasha.getMeeting(meeting.id).then((r) => r && setData({ note: r.note, transcript: r.transcript, version: 0 }))
+    void window.kasha.getMeeting(meeting.id).then((r) => r && setData({ note: r.note, transcript: r.transcript, audio: r.audio, version: 0 }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meeting.id])
 
   // Reload the note and transcript after they were rewritten on disk.
   const reload = () =>
     void window.kasha.getMeeting(meeting.id).then(
-      (r) => r && setData((cur) => ({ note: r.note, transcript: r.transcript, version: (cur?.version ?? 0) + 1 }))
+      (r) => r && setData((cur) => ({ note: r.note, transcript: r.transcript, audio: r.audio, version: (cur?.version ?? 0) + 1 }))
     )
+
+  // The recording on disk may have been saved or deleted.
+  const refreshAudio = () => void window.kasha.getMeeting(meeting.id).then((r) => r && setData((cur) => cur && { ...cur, audio: r.audio }))
 
   // When processing finishes the note and transcript on disk change.
   useEffect(() => {
     const was = prevStatus.current
     prevStatus.current = meeting.status
     if (was !== meeting.status && (was === 'transcribing' || was === 'separating' || was === 'summarizing')) reload()
+    else if (was === 'recording' && meeting.status !== 'recording') refreshAudio()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meeting.status, meeting.id])
 
@@ -273,6 +310,7 @@ export function NoteView(props: Props) {
 
       <div className="flex flex-1 flex-col gap-6 px-10 py-6 max-[820px]:px-6">
         <Notice meeting={meeting} />
+        {data?.audio && meeting.status !== 'recording' && <AudioNotice meeting={meeting} audio={data.audio} onChanged={refreshAudio} />}
         {/* The editor stays mounted on the Transcript tab, so it never shows an older copy of the note. */}
         {data && (
           <div className={cn('flex flex-col gap-6', tab !== 'notes' && 'hidden')}>

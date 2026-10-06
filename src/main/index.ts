@@ -37,12 +37,13 @@ import {
   type ToastState,
   type TranscriptSegment
 } from '@shared/types'
-import { listActions, ReminderScheduler, setActionDone } from './actions'
+import { listActions, ReminderScheduler, removeAction, setActionDone } from './actions'
+import { audioInfo, deleteAudio, exportAudio, startAudioSweeper } from './audio'
 import { lookupMeeting } from './calendar'
 import { log } from './log'
 import { MeetingDetector } from './detector'
 import { getLive, startLive, takeLive, type LiveTranscriber } from './live'
-import { syncToObsidian } from './obsidian'
+import { exportFileName, syncToObsidian } from './obsidian'
 import { cleanText, enqueue, type PipelineEvents } from './pipeline'
 import { Recording, type Track } from './recorder'
 import { takeScreenshot } from './screenshot'
@@ -210,10 +211,16 @@ function seenBefore(title: string): boolean {
 function worthOffering(title: string | null): title is string {
   if (!title) return false
   const r = ruleSettings()
-  return !listHas(r.meetings, title) && !listHas(r.declined, title)
+  return !listHas(r.meetings, title) && !listHas(r.declined, title) && !listHas(r.never, title)
 }
 
-function addToRule(key: 'meetings' | 'declined', title: string): void {
+/** The call is one the user never records: no prompt, no rule, in every mode. */
+function neverRecords(title: string, match?: CalendarMatch | null): boolean {
+  const r = ruleSettings()
+  return [title, match?.subject ?? ''].some((t) => t && !GENERIC_TITLE.test(t) && listHas(r.never, t))
+}
+
+function addToRule(key: 'meetings' | 'declined' | 'never', title: string): void {
   const r = ruleSettings()
   if (listHas(r[key], title)) return
   broadcast('settings-changed', store.setSettings({ recording: { ...r, [key]: [...r[key], title] } }))
@@ -404,7 +411,8 @@ function closeToast(): void {
 function showToast(state: ToastState): void {
   closeToast()
   toast = state
-  toastWin = createToastWindow()
+  // The call prompt has a third, smaller choice: never record this meeting.
+  toastWin = createToastWindow(state.kind === 'detected' && !GENERIC_TITLE.test(state.meeting.title) ? 184 : 156)
   toastWin.on('closed', () => (toastWin = null))
   log('prompt-shown', { kind: state.kind })
   if (state.kind === 'detected') return
@@ -422,6 +430,7 @@ async function onDetected(m: DetectedMeeting): Promise<void> {
   const r = settings.recording
   log('call-detected', { app: m.app, mode: r.mode, recording: !!recording, dismissed: dismissed.has(m.app), setup: settings.setupComplete })
   if (recording || dismissed.has(m.app) || !settings.setupComplete) return
+  if (neverRecords(m.title)) return log('call-skipped', { app: m.app })
   // Started now so the invite list is ready by the time it's needed.
   const calendar = r.lookupAttendees ? lookupMeeting(m.title) : Promise.resolve(null)
   lookups.set(m.app, calendar)
@@ -430,6 +439,12 @@ async function onDetected(m: DetectedMeeting): Promise<void> {
   // Someone on the always-record list may be in the invite.
   const match = await calendar
   if (recording || dismissed.has(m.app) || !detector.isLive(m.app)) return
+  // A generic window title can hide a meeting on the never list; the calendar subject gives it away.
+  if (neverRecords(m.title, match)) {
+    log('call-skipped', { app: m.app, prompt: toast?.kind === 'detected' })
+    if (toast?.kind === 'detected' && toast.meeting.app === m.app) closeToast()
+    return
+  }
   if (alwaysRecords(m.title, match)) await startRecording(undefined, m, { auto: true })
 }
 
@@ -458,7 +473,24 @@ function registerIpc(): void {
     if (!meeting) return null
     const live = getLive(id)
     const transcript = live ? live.current().map((s) => ({ ...s, text: cleanText(s.text) })) : store.readTranscript(id)
-    return { meeting, note: store.readNote(id), transcript }
+    return { meeting, note: store.readNote(id), transcript, audio: meeting.status === 'recording' ? null : audioInfo(id) }
+  })
+  handle('meetings:saveAudio', async (id: string) => {
+    const m = store.getMeeting(id)
+    if (!m || !audioInfo(id)) return false
+    const opts: Electron.OpenDialogOptions = { title: 'Save the recording to', properties: ['openDirectory', 'createDirectory'] }
+    const r = mainWin ? await dialog.showOpenDialog(mainWin, opts) : await dialog.showOpenDialog(opts)
+    if (r.canceled || !r.filePaths[0]) return false
+    const files = exportAudio(id, r.filePaths[0], exportFileName(m, '{date} {title}').replace(/\.md$/, ''))
+    log('audio-saved', { tracks: files.length })
+    if (files[0]) shell.showItemInFolder(files[0])
+    return files.length > 0
+  })
+  handle('meetings:deleteAudio', (id: string) => {
+    const m = store.getMeeting(id)
+    if (!m || m.status === 'recording' || m.status === 'transcribing' || m.status === 'separating') return
+    deleteAudio(id)
+    broadcast('meetings-changed')
   })
   handle('meetings:create', () => {
     const m = store.createMeeting({ title: 'New note', app: 'manual' })
@@ -595,6 +627,10 @@ function registerIpc(): void {
     setActionDone(id, Number(index), String(raw), !!done)
     broadcast('actions-changed')
   })
+  handle('actions:remove', (id: string, index: number, raw: string) => {
+    removeAction(id, Number(index), String(raw))
+    broadcast('actions-changed')
+  })
 
   const shareTarget = (id: string) => {
     const m = store.getMeeting(id)
@@ -658,6 +694,15 @@ function registerIpc(): void {
     closeToast()
     if (t?.kind === 'detected') dismissed.add(t.meeting.app)
     if (t?.kind === 'recurring') addToRule('declined', t.title)
+  })
+  ipcMain.on('toast:never', (e) => {
+    if (!isOwnWindow(e.sender)) return
+    const t = toast
+    log('prompt-never', { kind: t?.kind })
+    closeToast()
+    if (t?.kind !== 'detected') return
+    dismissed.add(t.meeting.app)
+    if (!GENERIC_TITLE.test(t.meeting.title)) addToRule('never', t.meeting.title)
   })
 
   handle('calendar:check', () => lookupMeeting('Teams meeting'))
@@ -770,6 +815,7 @@ app.whenReady().then(() => {
   registerIpc()
   applyLoginItem()
   updater.start()
+  startAudioSweeper(() => broadcast('meetings-changed'))
   tray = new Tray(trayIcon())
   tray.on('click', () => showMain())
   refreshTray()

@@ -12,6 +12,8 @@ const invoke = ipcRenderer.invoke.bind(ipcRenderer)
 const kasha: KashaApi = {
   listMeetings: () => invoke('meetings:list'),
   getMeeting: (id) => invoke('meetings:get', id),
+  saveAudio: (id) => invoke('meetings:saveAudio', id),
+  deleteAudio: (id) => invoke('meetings:deleteAudio', id),
   createNote: () => invoke('meetings:create'),
   updateMeeting: (id, patch) => invoke('meetings:update', id, patch),
   saveNote: (id, md) => invoke('meetings:saveNote', id, md),
@@ -26,6 +28,7 @@ const kasha: KashaApi = {
 
   listActions: () => invoke('actions:list'),
   setActionDone: (id, index, raw, done) => invoke('actions:setDone', id, index, raw, done),
+  removeAction: (id, index, raw) => invoke('actions:remove', id, index, raw),
 
   shareCopy: (id, opts) => invoke('share:copy', id, opts),
   shareEmail: (id, opts) => invoke('share:email', id, opts),
@@ -68,7 +71,8 @@ const kasha: KashaApi = {
 const toast: ToastApi = {
   state: () => invoke('toast:state'),
   accept: () => ipcRenderer.send('toast:accept'),
-  dismiss: () => ipcRenderer.send('toast:dismiss')
+  dismiss: () => ipcRenderer.send('toast:dismiss'),
+  never: () => ipcRenderer.send('toast:never')
 }
 
 const bar: BarApi = {

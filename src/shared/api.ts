@@ -1,6 +1,7 @@
 import type {
   ActionGroup,
   AppInfo,
+  AudioInfo,
   CalendarMatch,
   LiveState,
   Meeting,
@@ -20,7 +21,10 @@ import type {
 export interface KashaApi {
   // Meetings
   listMeetings(): Promise<Meeting[]>
-  getMeeting(id: string): Promise<{ meeting: Meeting; note: string; transcript: TranscriptSegment[] } | null>
+  getMeeting(id: string): Promise<{ meeting: Meeting; note: string; transcript: TranscriptSegment[]; audio: AudioInfo | null } | null>
+  /** Copies the recording to a folder the user picks. False if they cancelled. */
+  saveAudio(id: string): Promise<boolean>
+  deleteAudio(id: string): Promise<void>
   createNote(): Promise<Meeting>
   updateMeeting(id: string, patch: MeetingPatch): Promise<Meeting>
   saveNote(id: string, markdown: string): Promise<void>
@@ -38,6 +42,8 @@ export interface KashaApi {
   // Actions
   listActions(): Promise<ActionGroup[]>
   setActionDone(meetingId: string, index: number, raw: string, done: boolean): Promise<void>
+  /** Removes the task line from the note (it wasn't really an action). */
+  removeAction(meetingId: string, index: number, raw: string): Promise<void>
 
   // Share
   shareCopy(id: string, opts: ShareOptions): Promise<void>
@@ -95,6 +101,8 @@ export interface ToastApi {
   accept(): void
   /** "Not now", or "Just this once". */
   dismiss(): void
+  /** "Never record this meeting": adds the title to the never list. */
+  never(): void
 }
 
 /** Recording bar surface. Audio capture lives in this window. */
