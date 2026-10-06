@@ -80,12 +80,16 @@ const SEGMENTATION = {
   name: 'pyannote-segmentation-3.0.int8.onnx',
   fileSize: 1_540_506
 }
-// Voice embeddings for telling speakers apart and recognising them later: 3D-Speaker CAM++, English.
+// Voice embeddings for telling speakers apart and recognising them later:
+// 3D-Speaker ERes2Net, English. On real Teams audio it separates voices that
+// CAM++ (the first model Kasha used) ran together: different people score
+// 0.1-0.2 alike and the same person 0.7-0.8, where CAM++ gave 0.44 and 0.88.
+// TitaNet-large agreed with it exactly at four times the size.
 const EMBEDDING = {
-  name: '3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx',
-  url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx',
-  size: 29_596_978,
-  sha256: '357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b'
+  name: '3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx',
+  url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx',
+  size: 26_485_263,
+  sha256: 'c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5'
 }
 
 export const whisperPaths = {

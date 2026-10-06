@@ -50,7 +50,7 @@ import { Recording, type Track } from './recorder'
 import { takeScreenshot } from './screenshot'
 import { copyToClipboard, emailDraft, saveMarkdown, savePdf } from './share'
 import { redact } from './redact'
-import { downloadSpeech, setupStatus, speechReady } from './setup'
+import { downloadSpeech, setupStatus, speakersReady, speechReady } from './setup'
 import { syncVoices } from './speakers'
 import { whisperPrompt } from './speech'
 import * as store from './store'
@@ -844,6 +844,11 @@ app.whenReady().then(() => {
   applyLoginItem()
   updater.start()
   startAudioSweeper(() => broadcast('meetings-changed'))
+  // An update changed the voice model: fetch the new one (small) so speakers are still told apart.
+  if (store.getSettings().setupComplete && speechReady() && !speakersReady()) {
+    log('speaker-models-missing', { downloading: true })
+    void downloadSpeech(async () => broadcast('setup-changed', await setupStatus()))
+  }
   tray = new Tray(trayIcon())
   tray.on('click', () => showMain())
   refreshTray()

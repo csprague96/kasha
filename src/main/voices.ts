@@ -21,8 +21,14 @@ interface Voice {
   samples: VoiceSample[]
 }
 
-/** Cosine similarity at or above this counts as the same person. */
-export const MATCH = 0.7
+/**
+ * Cosine similarity at or above this counts as the same person. With the
+ * ERes2Net voiceprints, different people score under 0.2 and the same person
+ * about 0.75 within one call; across calls the mic and room differ, hence the
+ * margin. Voiceprints from the earlier CAM++ model have a different length
+ * and are never compared.
+ */
+export const MATCH = 0.6
 const MAX_SAMPLES = 10
 
 const file = () => join(paths.root(), 'voices.json')
@@ -62,6 +68,7 @@ export function match(v: ArrayLike<number>): { name: string; score: number } | n
   let best: { name: string; score: number } | null = null
   for (const voice of load()) {
     for (const s of voice.samples) {
+      if (s.v.length !== v.length) continue // learned with a different model
       const score = cosine(v, s.v)
       if (score >= MATCH && (!best || score > best.score)) best = { name: voice.name, score }
     }

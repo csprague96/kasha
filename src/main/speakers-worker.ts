@@ -48,22 +48,22 @@ const BLOCK = 15 * 60 // seconds of speech analysed at once
  * its own grouping of turns into people contradicted the voiceprints on real
  * Teams audio: turns it called different people were 0.7-0.9 alike, and turns
  * it called one person 0.0-0.3. So turns are cut into short windows, each gets
- * its own voiceprint, and Kasha groups those. On that call, window pairs fell
- * into two bands, about 0.1-0.3 (different people) and 0.6-0.9 (same person),
- * and grouping at 0.3-0.35 gave the same three voices either way.
+ * its own voiceprint (ERes2Net; see setup.ts), and Kasha groups those. On a
+ * real call, window pairs fell into two bands, about 0.0-0.2 (different
+ * people) and 0.4-0.7 (same person), with the valley at 0.2-0.3.
  */
 const CLUSTER_THRESHOLD = 0.5 // pyannote's grouping; only its turn boundaries are used
 const WINDOW = 2.5 // seconds of speech per voiceprint; long turns can hide a change of speaker
 const MIN_WINDOW = 1.0 // shorter turns are too short for a voiceprint; they follow the nearest window
 const CUT = 0.35 // windows grouped while their average similarity is at least this
-// With an expected head count, stricter cuts are tried until that many voices
-// appear. On a real call, two similar voices only came apart at 0.55.
-const CUTS = [CUT, 0.45, 0.55, 0.65]
+// With an expected head count, a stricter cut is tried when fewer voices than
+// that appear. Beyond 0.45 the voiceprints shatter into fragments.
+const CUTS = [CUT, 0.45]
 const SUBSTANTIAL = 20 // seconds of speech for a group to count as a person
-const SAME = 0.85 // groups this alike are one person even when more are expected
-const MERGE = 0.5 // clusters at least this similar are the same person; split pieces of one voice rejoin here
+const SAME = 0.7 // groups this alike are one person even when more are expected
+const MERGE = 0.4 // clusters at least this similar are the same person; split pieces of one voice rejoin here
 const TINY = 4 // clusters with less speech than this join their nearest voice…
-const TINY_MATCH = 0.35 // …if it sounds at least this alike. Otherwise they're someone who said little.
+const TINY_MATCH = 0.3 // …if it sounds at least this alike. Otherwise they're someone who said little.
 const EMBED_SECONDS = 60 // audio per cluster used for its embedding
 
 interface Piece {
