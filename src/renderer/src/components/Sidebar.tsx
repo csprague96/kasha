@@ -1,8 +1,9 @@
-import { AlertCircle, ListChecks, Loader2, Plus, Search, Settings as SettingsIcon } from 'lucide-react'
+import { AlertCircle, ListChecks, Loader2, Plus, Search, Settings as SettingsIcon, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { Meeting, Settings } from '@shared/types'
 import type { View } from '@/App'
 import { cn, dayGroup, hhmm } from '@/lib/utils'
+import { DayPicker, dayKey, dayLabel } from './DayPicker'
 import { Button } from './ui/button'
 import { VersionLine } from './Updates'
 import { Wordmark } from './Wordmark'
@@ -55,12 +56,24 @@ function SyncLine({ meetings, settings, onClick }: { meetings: Meeting[]; settin
 
 export function Sidebar({ meetings, view, settings, openActions, onSelect, onNewNote }: Props) {
   const [query, setQuery] = useState('')
+  const [day, setDay] = useState<string | null>(null)
+
+  // How many notes each day has, for the calendar.
+  const days = useMemo(() => {
+    const out = new Map<string, number>()
+    for (const m of meetings) {
+      const k = dayKey(new Date(m.recordingStartedAt ?? m.createdAt))
+      out.set(k, (out.get(k) ?? 0) + 1)
+    }
+    return out
+  }, [meetings])
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase()
-    const filtered = q
+    let filtered = q
       ? meetings.filter((m) => m.title.toLowerCase().includes(q) || m.tags.some((t) => t.includes(q.replace(/^#/, ''))))
       : meetings
+    if (day) filtered = filtered.filter((m) => dayKey(new Date(m.recordingStartedAt ?? m.createdAt)) === day)
     const out: Array<{ label: string; items: Meeting[] }> = []
     for (const m of filtered) {
       const label = dayGroup(m.recordingStartedAt ?? m.createdAt)
@@ -69,7 +82,7 @@ export function Sidebar({ meetings, view, settings, openActions, onSelect, onNew
       else out.push({ label, items: [m] })
     }
     return out
-  }, [meetings, query])
+  }, [meetings, query, day])
 
   return (
     <aside className="flex min-h-0 flex-col gap-4 border-r border-border bg-sidebar px-3 pt-4 pb-3">
@@ -96,23 +109,45 @@ export function Sidebar({ meetings, view, settings, openActions, onSelect, onNew
           )}
         </button>
       </div>
-      <label className="relative block">
-        <span className="sr-only">Search notes</span>
-        <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted" />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search notes"
-          className="h-8 w-full rounded-md border border-border bg-surface pr-2 pl-8 text-[13px] placeholder:text-muted focus-visible:outline-offset-0"
-        />
-      </label>
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center gap-1">
+          <label className="relative block min-w-0 flex-1">
+            <span className="sr-only">Search notes</span>
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search notes"
+              className="h-8 w-full rounded-md border border-border bg-surface pr-2 pl-8 text-[13px] placeholder:text-muted focus-visible:outline-offset-0"
+            />
+          </label>
+          <DayPicker days={days} selected={day} onSelect={setDay} />
+        </div>
+        {day && (
+          <button
+            onClick={() => setDay(null)}
+            className="flex w-max items-center gap-1 rounded-md bg-foreground/5 py-0.5 pr-1.5 pl-2 text-xs text-muted hover:text-foreground"
+            aria-label={`Showing ${dayLabel(day)}. Clear`}
+          >
+            {dayLabel(day)}
+            <X className="size-3" />
+          </button>
+        )}
+      </div>
 
       <nav className="-mx-1 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-1">
-        {groups.length === 0 && query && (
+        {groups.length === 0 && (query || day) && (
           <p className="px-2 py-1 text-[13px] text-muted">
-            No notes match "{query}".{' '}
-            <button className="text-primary hover:underline" onClick={() => setQuery('')}>
-              Clear search
+            {query ? `No notes match "${query}"` : 'No notes'}
+            {day ? ` on ${dayLabel(day)}` : ''}.{' '}
+            <button
+              className="text-primary hover:underline"
+              onClick={() => {
+                setQuery('')
+                setDay(null)
+              }}
+            >
+              Show all
             </button>
           </p>
         )}
