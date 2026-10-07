@@ -26,6 +26,12 @@ export interface SpeakerRequest {
    * fix (give two the same name) than too few.
    */
   expected?: number
+  /**
+   * How many other people were in the call (seen in the Teams window). Unlike
+   * the invite, that's an upper bound: voices beyond it are pieces of someone
+   * already found, and the most alike are joined until there are no more.
+   */
+  max?: number
 }
 
 export interface SpeakerCluster {
@@ -64,6 +70,7 @@ const SAME = 0.7 // groups this alike are one person even when more are expected
 const MERGE = 0.4 // clusters at least this similar are the same person; split pieces of one voice rejoin here
 const TINY = 4 // clusters with less speech than this join their nearest voice…
 const TINY_MATCH = 0.3 // …if it sounds at least this alike. Otherwise they're someone who said little.
+const CRUMB = 2.5 // less than this always joins its nearest voice: a 60-minute call left four 1-2 s "speakers"
 const EMBED_SECONDS = 60 // audio per cluster used for its embedding
 
 interface Piece {
@@ -212,7 +219,7 @@ function groupWithHint(vectors: number[][], lengths: number[], expected?: number
  * nearest. With an expected head count, alike clusters stop merging once
  * there are that many people, unless they're near-identical.
  */
-function consolidate(clusters: SpeakerCluster[], expected?: number): SpeakerCluster[] {
+function consolidate(clusters: SpeakerCluster[], expected?: number, max?: number): SpeakerCluster[] {
   const join = (into: SpeakerCluster, from: SpeakerCluster): SpeakerCluster => ({
     segments: [...into.segments, ...from.segments].sort((x, y) => x.start - y.start),
     seconds: into.seconds + from.seconds,
@@ -240,10 +247,23 @@ function consolidate(clusters: SpeakerCluster[], expected?: number): SpeakerClus
     for (const small of list.filter((c) => c.seconds < TINY)) {
       let k = 0
       for (let i = 1; i < big.length; i++) if (cosine(small.embedding, big[i].embedding) > cosine(small.embedding, big[k].embedding)) k = i
-      if (cosine(small.embedding, big[k].embedding) >= TINY_MATCH) big[k] = join(big[k], small)
+      if (small.seconds < CRUMB || cosine(small.embedding, big[k].embedding) >= TINY_MATCH) big[k] = join(big[k], small)
       else kept.push(small)
     }
     list = [...big, ...kept]
+  }
+  // No more voices than people in the call.
+  while (max && max > 0 && list.length > max) {
+    let best = { i: 0, j: 1, score: -Infinity }
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const score = cosine(list[i].embedding, list[j].embedding)
+        if (score > best.score) best = { i, j, score }
+      }
+    }
+    const merged = join(list[best.i], list[best.j])
+    list = list.filter((_, k) => k !== best.i && k !== best.j)
+    list.push(merged)
   }
   return list.sort((a, b) => a.segments[0].start - b.segments[0].start)
 }
@@ -351,7 +371,7 @@ export function separate(req: SpeakerRequest): SpeakerCluster[] {
       if (seconds < 0.5) continue
       clusters.push({ segments, seconds, embedding: embeddingOf(segments) })
     }
-    return consolidate(clusters, req.expected)
+    return consolidate(clusters, req.expected, req.max)
   } finally {
     closeSync(fd)
   }

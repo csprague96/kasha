@@ -305,6 +305,35 @@ export function saveRoster(meetingId: string, timeline: RosterSnapshot[]): void 
   log('teams-names', { snapshots: all.length, people: people.size })
 }
 
+/** The ways a company tends to build an address from a name: slee, sam.lee, samlee, sam_lee, sam, lees. */
+function addressForms(name: string): string[] {
+  const words = normName(name)
+    .replace(/[^\p{L}\s'-]/gu, ' ')
+    .split(/\s+/)
+    .map((w) => w.replace(/['-]/g, ''))
+    .filter(Boolean)
+  if (words.length < 2) return words
+  const first = words[0]
+  const last = words[words.length - 1]
+  return [first[0] + last, `${first}.${last}`, first + last, `${first}_${last}`, `${first}-${last}`, last + first[0], `${last}.${first}`]
+}
+
+/**
+ * Swaps invite entries that are only an address (the calendar lookup often
+ * gives addresses, not names) for the name Teams showed for that person. An
+ * address is matched only when exactly one person in the call fits it.
+ */
+export function resolveAttendees(attendees: string[], people: string[]): string[] {
+  const out = attendees.map((a) => {
+    const m = /^([^@\s]+)@/.exec(a)
+    if (!m) return a
+    const local = m[1].toLowerCase()
+    const hits = people.filter((p) => addressForms(p).includes(local))
+    return hits.length === 1 ? hits[0] : a
+  })
+  return Array.from(new Set(out))
+}
+
 // ---------- Naming voices ----------
 
 /** Everyone seen in the call except the note taker, first-seen spelling. */
