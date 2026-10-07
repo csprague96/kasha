@@ -49,7 +49,7 @@ import { getLive, startLive, takeLive, type LiveTranscriber } from './live'
 import { exportFileName, exportOptions, syncToObsidian, vaultFiles } from './obsidian'
 import { cleanText, enqueue, type PipelineEvents } from './pipeline'
 import { Recording, repairWav, SAMPLE_RATE, type Track } from './recorder'
-import { saveRoster, TeamsRoster } from './roster'
+import { saveRoster, teamsCallOpen, TeamsRoster } from './roster'
 import { takeScreenshot } from './screenshot'
 import { copyToClipboard, emailDraft, saveMarkdown, savePdf } from './share'
 import { redact } from './redact'
@@ -125,7 +125,15 @@ function resumable(from: DetectedMeeting): { id: string; crashed: boolean } | nu
   return prev?.status === 'failed' && normName(prev.detectedTitle ?? prev.title) === normName(from.title) ? cut : null
 }
 
-const detector = new MeetingDetector(() => store.getSettings().detect)
+const detector = new MeetingDetector(
+  () => store.getSettings().detect,
+  async (app) => {
+    if (app !== 'teams') return null
+    const open = await teamsCallOpen()
+    log('mic-released', { app, callOpen: open ?? 'unknown' })
+    return open
+  }
+)
 
 /** A recording or processing in progress: an update must wait for it. */
 const busy = () =>
@@ -373,7 +381,7 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
   const roster = settings.speakers.fromTeams && (meeting.app === 'teams' || detector.isLive('teams')) ? new TeamsRoster(startedAt) : null
   void roster?.start()
   recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted, restarts: [], roster }
-  log('recording-started', { app: meeting.app, how: resume ? 'resume' : opts.auto ? 'auto' : opts.accepted ? 'prompt' : 'manual', live: !!live, carriedOnMin: had ? Math.round(had / 60) : undefined })
+  log('recording-started', { app: meeting.app, how: resume ? 'resume' : opts.auto ? 'auto' : opts.accepted ? 'prompt' : 'manual', live: !!live, model: settings.speechModel, carriedOnMin: had ? Math.round(had / 60) : undefined })
   closeToast()
   if ((opts.auto || resume) && Notification.isSupported()) {
     const body = resume
@@ -474,11 +482,13 @@ const pipelineEvents: PipelineEvents = {
 
 function finalizeRecording(): void {
   if (!recording) return
-  const { meetingId, rec, startedAt, roster } = recording
+  const { meetingId, rec, startedAt, roster, live } = recording
   recording = null
+  // How far live transcription is behind: what's left to do after the call.
+  const behind = live?.pending()
   const tracks = rec.close()
   if (roster) saveRoster(meetingId, roster.stop())
-  log('recording-stopped', { tracks: tracks.map((t) => t.track).join('+') || 'none', minutes: Math.round((Date.now() - startedAt) / 60_000) })
+  log('recording-stopped', { tracks: tracks.map((t) => t.track).join('+') || 'none', minutes: Math.round((Date.now() - startedAt) / 60_000), chunksLeft: behind })
   store.updateMeeting(meetingId, {
     recordingEndedAt: new Date().toISOString(),
     status: tracks.length ? 'transcribing' : 'ready',

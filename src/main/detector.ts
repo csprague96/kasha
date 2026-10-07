@@ -145,7 +145,10 @@ export async function meetingTitle(app: DetectableApp): Promise<string> {
 /**
  * Emits:
  *  - 'start' (DetectedMeeting) when a meeting app has held the mic for a few seconds
- *  - 'end'   (app) when it has released the mic for ~20s
+ *  - 'end'   (app) when it has released the mic for ~20s, and `stillInCall`
+ *    doesn't say the call is still open. Teams can let go of the mic for a
+ *    minute or more mid-call; ending on that alone cut a recording off at 27
+ *    minutes and then prompted again every time Teams took the mic back.
  */
 export class MeetingDetector extends EventEmitter {
   private timer: NodeJS.Timeout | null = null
@@ -154,7 +157,10 @@ export class MeetingDetector extends EventEmitter {
   private live = new Set<DetectableApp>()
   private busy = false
 
-  constructor(private enabled: () => Record<DetectableApp, boolean>) {
+  constructor(
+    private enabled: () => Record<DetectableApp, boolean>,
+    private stillInCall: (app: DetectableApp) => Promise<boolean | null> = async () => null
+  ) {
     super()
   }
 
@@ -194,6 +200,11 @@ export class MeetingDetector extends EventEmitter {
           const n = (this.gone.get(app) ?? 0) + 1
           this.gone.set(app, n)
           if (n >= END_POLLS) {
+            // The mic is quiet but the call is still open: look again in ~20 s.
+            if ((await this.stillInCall(app)) === true) {
+              this.gone.set(app, 0)
+              continue
+            }
             this.live.delete(app)
             this.gone.delete(app)
             this.emit('end', app)

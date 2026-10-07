@@ -155,6 +155,13 @@ static class KashaTeams {
   }
 
   static void Main(string[] args) {
+    // "once": is a call open in Teams right now? Used when Teams lets go of the mic.
+    if (args.Length > 0 && args[0] == "once") {
+      bool open = false;
+      try { open = Find() != IntPtr.Zero; } catch { }
+      Console.Out.WriteLine(open ? "{\"call\":true}" : "{\"call\":false}");
+      return;
+    }
     int every = args.Length > 0 ? int.Parse(args[0]) : 2000;
     try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
     // Kasha closes stdin when it's done (or goes away): stop then.
@@ -217,6 +224,22 @@ function helper(): Promise<string | null> {
     })
   })
   return compiling
+}
+
+/**
+ * Whether a Teams call window (one with a Leave button) is open. Teams can let
+ * go of the microphone mid-call, for a minute or more, so the mic alone can't
+ * say a call has ended. null when it can't tell.
+ */
+export async function teamsCallOpen(): Promise<boolean | null> {
+  const exe = await helper()
+  if (!exe) return null
+  return new Promise((resolve) => {
+    execFile(exe, ['once'], { windowsHide: true, timeout: 15_000 }, (err, stdout) => {
+      if (err) return resolve(null)
+      resolve(/"call":true/.test(stdout) ? true : /"call":false/.test(stdout) ? false : null)
+    })
+  })
 }
 
 /** Watches the Teams window for the length of one recording. */

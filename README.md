@@ -98,6 +98,7 @@ Tell people on the call when you're transcribing.
 
 - `%APPDATA%\Kasha\kasha.log` records events and counts only (no titles, names or text): calls detected, recordings started and stopped, memory every 5 minutes while recording, crashed windows and processes, and errors. Crash dumps stay in `%APPDATA%\Kasha\Crashpad`.
 - Audio files stay valid while recording, so a crash loses at most the last few seconds. If Kasha restarts while the same call is still going (within 15 minutes), it carries on recording into the same note instead of asking again; otherwise the note offers **Retry**.
+- Teams can let go of the microphone for a minute or more mid-call (muted, or switching devices). A Teams call only counts as over once its meeting window has no **Leave** button, so recording doesn't stop early or prompt again.
 - If audio capture stops mid-call (a headset unplugged, Windows restarting its audio), the bar restarts it and fills the gap with silence so times still line up.
 
 ## Development

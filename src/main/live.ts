@@ -125,6 +125,11 @@ export class LiveTranscriber {
     t.seconds += bytes / 2 / SAMPLE_RATE
   }
 
+  /** Chunks queued but not transcribed yet. */
+  pending(): number {
+    return this.chunks - this.finished
+  }
+
   /** Lines transcribed so far, in time order. */
   current(): TranscriptSegment[] {
     return [...this.segments].sort((a, b) => a.start - b.start)
