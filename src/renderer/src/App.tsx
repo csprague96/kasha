@@ -2,11 +2,11 @@ import { useCallback, useEffect, useState } from 'react'
 import type { ActionGroup, ActionItem, Meeting, RecordingInfo, Settings as SettingsT } from '@shared/types'
 import { ActionsView } from './components/ActionsView'
 import { NoteView } from './components/NoteView'
-import { Settings } from './components/Settings'
+import { Settings, type SettingsPage } from './components/Settings'
 import { Setup } from './components/Setup'
 import { Sidebar } from './components/Sidebar'
 
-export type View = { kind: 'note'; id: string } | { kind: 'settings' } | { kind: 'actions' } | { kind: 'empty' }
+export type View = { kind: 'note'; id: string } | { kind: 'settings'; page?: SettingsPage } | { kind: 'actions' } | { kind: 'empty' }
 
 function initialView(): View {
   const hash = location.hash.slice(1)
@@ -23,6 +23,8 @@ export function App() {
   const [progress, setProgress] = useState<Record<string, number>>({})
   const [view, setView] = useState<View>(initialView)
   const [actions, setActions] = useState<ActionGroup[]>([])
+  // Settings reopens on the page last shown, unless a link asks for a particular one.
+  const [settingsPage, setSettingsPage] = useState<SettingsPage>('recording')
 
   const refresh = useCallback(() => void window.kasha.listMeetings().then(setMeetings), [])
   const refreshActions = useCallback(() => void window.kasha.listActions().then(setActions), [])
@@ -71,6 +73,10 @@ export function App() {
     }
   }, [meetings, view])
 
+  useEffect(() => {
+    if (view.kind === 'settings' && view.page) setSettingsPage(view.page)
+  }, [view])
+
   const updateSettings = async (patch: Partial<SettingsT>) => setSettings(await window.kasha.setSettings(patch))
 
   if (!settings) return null
@@ -112,7 +118,14 @@ export function App() {
         onNewNote={newNote}
       />
       <main className="min-w-0 overflow-y-auto">
-        {view.kind === 'settings' && <Settings settings={settings} onChange={updateSettings} />}
+        {view.kind === 'settings' && (
+          <Settings
+            settings={settings}
+            onChange={updateSettings}
+            page={view.page ?? settingsPage}
+            onPage={(page) => setView({ kind: 'settings', page })}
+          />
+        )}
         {view.kind === 'actions' && (
           <ActionsView groups={actions} onToggle={toggleAction} onRemove={removeAction} onOpenMeeting={(id) => setView({ kind: 'note', id })} />
         )}

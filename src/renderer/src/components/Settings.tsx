@@ -1,5 +1,5 @@
-import { Check, X } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { AudioLines, Check, ListChecks, Mic, NotebookText, Radar, SlidersHorizontal, SpellCheck, Tag, Users, X, type LucideIcon } from 'lucide-react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   APP_LABELS,
   normName,
@@ -37,7 +37,7 @@ export function useSetupStatus(): [SetupStatus | null, () => void] {
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="flex flex-col gap-4">
-      <h2 className="text-base font-semibold">{title}</h2>
+      <h2 className="text-lg font-semibold">{title}</h2>
       {children}
     </section>
   )
@@ -450,59 +450,34 @@ function ModelPicker({
   )
 }
 
-export function Settings({ settings, onChange }: Props) {
+export type SettingsPage = 'recording' | 'detection' | 'transcription' | 'speakers' | 'vocabulary' | 'obsidian' | 'tags' | 'actions' | 'general'
+
+const PAGES: Array<{ id: SettingsPage; label: string; icon: LucideIcon }> = [
+  { id: 'recording', label: 'Recording', icon: Mic },
+  { id: 'detection', label: 'Meeting detection', icon: Radar },
+  { id: 'transcription', label: 'Transcription', icon: AudioLines },
+  { id: 'speakers', label: 'Speakers', icon: Users },
+  { id: 'vocabulary', label: 'Names and terms', icon: SpellCheck },
+  { id: 'obsidian', label: 'Obsidian', icon: NotebookText },
+  { id: 'tags', label: 'Tags', icon: Tag },
+  { id: 'actions', label: 'Actions', icon: ListChecks },
+  { id: 'general', label: 'General', icon: SlidersHorizontal }
+]
+
+/** Settings, one page per area with a menu beside it (above it in a narrow window). */
+export function Settings({ settings, onChange, page, onPage }: Props & { page: SettingsPage; onPage: (p: SettingsPage) => void }) {
   const [status, refreshStatus] = useSetupStatus()
+  const top = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    top.current?.closest('main')?.scrollTo(0, 0)
+  }, [page])
   const ob = settings.obsidian
   const setOb = (patch: Partial<SettingsT['obsidian']>) => onChange({ obsidian: { ...ob, ...patch } })
   const rec = settings.recording
   const setRec = (patch: Partial<SettingsT['recording']>) => onChange({ recording: { ...rec, ...patch } })
 
-  return (
-    <div className="flex max-w-[620px] flex-col gap-10 px-10 py-8 max-[820px]:px-6">
-      <h1 className="text-xl font-semibold">Settings</h1>
-
-      <Section title="Obsidian">
-        <Field label="Vault">
-          <VaultPicker settings={settings} onChange={onChange} vaults={status?.vaults ?? []} />
-        </Field>
-        <Field label="Folder">
-          <LazyInput className="font-mono text-[13px]" value={ob.folder} onCommit={(v) => setOb({ folder: v.trim() })} />
-        </Field>
-        <Field label="File name" hint="Use {date}, {time} and {title}.">
-          <LazyInput className="font-mono text-[13px]" value={ob.fileName} onCommit={(v) => setOb({ fileName: v.trim() || '{date} {title}' })} />
-        </Field>
-        <div className="flex flex-col gap-3">
-          <Toggle label="Sync when a meeting ends" checked={ob.syncOnEnd} onChange={(v) => setOb({ syncOnEnd: v })} />
-          <Toggle label="Include full transcript" checked={ob.includeTranscript} onChange={(v) => setOb({ includeTranscript: v })} />
-          <Toggle label="Save screenshots to attachments/" checked={ob.attachments} onChange={(v) => setOb({ attachments: v })} />
-        </div>
-        <Field label="Preview">
-          <pre className="m-0 rounded-md border border-border bg-surface p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-muted">
-            {preview(settings)}
-          </pre>
-        </Field>
-      </Section>
-
-      <Section title="Tags">
-        <Field group label="On every note" hint="Added to the tags of every note Kasha writes to Obsidian, so they're easy to find there.">
-          <NameList
-            items={settings.tags.defaults}
-            onChange={(defaults) => void onChange({ tags: { ...settings.tags, defaults: defaults.map(normTag).filter(Boolean) } })}
-            placeholder="Tag, e.g. meeting"
-            label="New standing tag"
-          />
-        </Field>
-        <Toggle
-          label="Let the summary add topic tags"
-          hint="One to three lowercase tags per note, from what was discussed. Off, notes only get the tags you add."
-          checked={settings.tags.fromSummary}
-          onChange={(v) => onChange({ tags: { ...settings.tags, fromSummary: v } })}
-        />
-        <Field group label="In use" hint="Rename a tag to change it on every note (two tags with the same name merge). Synced notes are written to Obsidian again.">
-          <TagList />
-        </Field>
-      </Section>
-
+  const pages: Record<SettingsPage, ReactNode> = {
+    recording: (
       <Section title="Recording">
         <div className="flex flex-col gap-2" role="radiogroup" aria-label="When a call starts">
           <span className="text-xs text-muted">When a call starts</span>
@@ -555,7 +530,8 @@ export function Settings({ settings, onChange }: Props) {
         />
         {rec.lookupAttendees && <CalendarCheck />}
       </Section>
-
+    ),
+    detection: (
       <Section title="Meeting detection">
         <p className="-mt-2 text-[13px] text-muted">Kasha notices a call when one of these apps starts using your microphone.</p>
         <div className="flex flex-col gap-3">
@@ -570,7 +546,8 @@ export function Settings({ settings, onChange }: Props) {
           ))}
         </div>
       </Section>
-
+    ),
+    transcription: (
       <Section title="Transcription">
         <Field group label="Speech model" hint="All of them run on this PC, so audio never leaves it. Changing the model downloads it once.">
           <ModelPicker settings={settings} status={status} onChange={onChange} refresh={refreshStatus} />
@@ -631,7 +608,8 @@ export function Settings({ settings, onChange }: Props) {
           onChange={(v) => onChange({ keepAudio: v })}
         />
       </Section>
-
+    ),
+    speakers: (
       <Section title="Speakers">
         <Toggle
           label="Tell speakers apart"
@@ -646,8 +624,15 @@ export function Settings({ settings, onChange }: Props) {
           onChange={(v) => onChange({ speakers: { ...settings.speakers, recognize: v } })}
         />
         {settings.speakers.recognize && <Voices />}
+        <Toggle
+          label="Name people from the Teams window"
+          hint="While a Teams call is recorded, Kasha reads who's in it and who's muted from the meeting window, the way a screen reader does. A one-to-one call is named outright; in a group call, a voice that talks while only one person is unmuted gets that name to confirm. No captions needed, and nothing leaves this PC."
+          checked={settings.speakers.fromTeams}
+          onChange={(v) => onChange({ speakers: { ...settings.speakers, fromTeams: v } })}
+        />
       </Section>
-
+    ),
+    vocabulary: (
       <Section title="Names and terms">
         <p className="-mt-2 text-[13px] text-muted">
           People’s names and product terms the speech model should spell right. Kasha passes them to it as hints, and replaces
@@ -655,7 +640,66 @@ export function Settings({ settings, onChange }: Props) {
         </p>
         <Vocabulary entries={settings.vocabulary} onChange={(vocabulary) => void onChange({ vocabulary })} />
       </Section>
-
+    ),
+    obsidian: (
+      <Section title="Obsidian">
+        <Field label="Vault">
+          <VaultPicker settings={settings} onChange={onChange} vaults={status?.vaults ?? []} />
+        </Field>
+        <Field label="Folder">
+          <LazyInput className="font-mono text-[13px]" value={ob.folder} onCommit={(v) => setOb({ folder: v.trim() })} />
+        </Field>
+        <Field label="File name" hint="Use {date}, {time} and {title}.">
+          <LazyInput className="font-mono text-[13px]" value={ob.fileName} onCommit={(v) => setOb({ fileName: v.trim() || '{date} {title}' })} />
+        </Field>
+        <div className="flex flex-col gap-3">
+          <Toggle label="Sync when a meeting ends" checked={ob.syncOnEnd} onChange={(v) => setOb({ syncOnEnd: v })} />
+          <Toggle label="Include full transcript" checked={ob.includeTranscript} onChange={(v) => setOb({ includeTranscript: v })} />
+          <Toggle label="Save screenshots to attachments/" checked={ob.attachments} onChange={(v) => setOb({ attachments: v })} />
+        </div>
+        <Field
+          label="When you delete a note in Kasha"
+          hint="Applies to notes already synced. Obsidian files go to the Recycle Bin, with the screenshots Kasha saved for them."
+        >
+          <select
+            value={ob.onDelete}
+            onChange={(e) => void setOb({ onDelete: e.target.value as SettingsT['obsidian']['onDelete'] })}
+            className="h-9 w-fit rounded-md border border-border bg-surface px-2 text-sm focus-visible:outline-offset-0"
+          >
+            <option value="ask">Ask each time</option>
+            <option value="both">Delete it from Obsidian too</option>
+            <option value="kasha">Keep it in Obsidian</option>
+          </select>
+        </Field>
+        <Field label="Preview">
+          <pre className="m-0 rounded-md border border-border bg-surface p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-muted">
+            {preview(settings)}
+          </pre>
+        </Field>
+      </Section>
+    ),
+    tags: (
+      <Section title="Tags">
+        <Field group label="On every note" hint="Added to the tags of every note Kasha writes to Obsidian, so they're easy to find there.">
+          <NameList
+            items={settings.tags.defaults}
+            onChange={(defaults) => void onChange({ tags: { ...settings.tags, defaults: defaults.map(normTag).filter(Boolean) } })}
+            placeholder="Tag, e.g. meeting"
+            label="New standing tag"
+          />
+        </Field>
+        <Toggle
+          label="Let the summary add topic tags"
+          hint="One to three lowercase tags per note, from what was discussed. Off, notes only get the tags you add."
+          checked={settings.tags.fromSummary}
+          onChange={(v) => onChange({ tags: { ...settings.tags, fromSummary: v } })}
+        />
+        <Field group label="In use" hint="Rename a tag to change it on every note (two tags with the same name merge). Synced notes are written to Obsidian again.">
+          <TagList />
+        </Field>
+      </Section>
+    ),
+    actions: (
       <Section title="Actions">
         <Field label="Your name" hint="Actions assigned to this name in a meeting count as yours.">
           <LazyInput value={settings.myName} placeholder="First and last name" onCommit={(v) => onChange({ myName: v.trim() })} />
@@ -677,7 +721,8 @@ export function Settings({ settings, onChange }: Props) {
           </Field>
         )}
       </Section>
-
+    ),
+    general: (
       <Section title="General">
         <Toggle
           label="Start Kasha when you sign in"
@@ -686,6 +731,31 @@ export function Settings({ settings, onChange }: Props) {
         />
         <UpdateControls />
       </Section>
+    )
+  }
+
+  return (
+    <div ref={top} className="flex gap-10 px-10 py-8 max-[1000px]:flex-col max-[1000px]:gap-6 max-[820px]:px-6">
+      <nav aria-label="Settings" className="sticky top-8 flex w-44 shrink-0 flex-col gap-0.5 self-start max-[1000px]:static max-[1000px]:w-auto">
+        <h1 className="px-2 pb-3 text-xl font-semibold">Settings</h1>
+        <div className="flex flex-col gap-0.5 max-[1000px]:flex-row max-[1000px]:flex-wrap">
+          {PAGES.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              onClick={() => onPage(id)}
+              aria-current={page === id ? 'page' : undefined}
+              className={cn(
+                'flex items-center gap-2.5 rounded-md border px-2 py-[7px] text-left text-sm',
+                page === id ? 'border-border bg-surface font-medium' : 'border-transparent text-muted hover:bg-foreground/5 hover:text-foreground'
+              )}
+            >
+              <Icon className="size-4 shrink-0" aria-hidden="true" />
+              {label}
+            </button>
+          ))}
+        </div>
+      </nav>
+      <div className="flex max-w-[620px] min-w-0 flex-1 flex-col">{pages[page]}</div>
     </div>
   )
 }

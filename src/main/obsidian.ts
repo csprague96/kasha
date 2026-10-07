@@ -1,5 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { basename, extname, join } from 'node:path'
+import { basename, dirname, extname, join } from 'node:path'
 import { attendance, attendanceSummary } from '@shared/attendance'
 import { APP_LABELS, speakerName, type Meeting, type Settings, type TranscriptSegment } from '@shared/types'
 import { paths } from './store'
@@ -117,4 +117,20 @@ export function syncToObsidian(
   writeFileSync(tmp, md)
   renameSync(tmp, target)
   return { state: 'synced', path: target, at: new Date().toISOString(), mtimeMs: statSync(target).mtimeMs }
+}
+
+/**
+ * The files Kasha wrote to the vault for a note: the .md and the screenshots it
+ * copied into attachments/ beside it. Only ones still there. The .md comes
+ * last, so a delete that fails partway can be tried again.
+ */
+export function vaultFiles(m: Meeting, note: string): string[] {
+  const file = m.sync.path
+  if (!file || extname(file).toLowerCase() !== '.md' || !existsSync(file)) return []
+  const stem = basename(file, '.md')
+  const attachDir = join(dirname(file), 'attachments')
+  const images = Array.from(note.matchAll(/!\[[^\]]*\]\((attachments\/[^)\s]+)\)/g), ([, rel]) =>
+    join(attachDir, `${stem} ${basename(rel, extname(rel))}${extname(rel)}`)
+  )
+  return [...new Set(images.filter((f) => existsSync(f))), file]
 }

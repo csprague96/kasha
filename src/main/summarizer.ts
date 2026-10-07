@@ -80,6 +80,8 @@ export interface SummaryContext {
   myName: string
   speakers?: Meeting['speakers']
   attendees?: string[]
+  /** Seen in the call itself (the Teams window), besides the note taker. */
+  participants?: string[]
 }
 
 function buildPrompt(ctx: SummaryContext, notes: string, transcript: TranscriptSegment[]): string {
@@ -93,6 +95,7 @@ function buildPrompt(ctx: SummaryContext, notes: string, transcript: TranscriptS
     `Meeting date: ${date}`,
     `Note taker's name: ${ctx.myName.trim() || '(not given)'}`,
     `Invited: ${ctx.attendees?.length ? ctx.attendees.join(', ') : '(not known)'}`,
+    ...(ctx.participants?.length ? [`In the call: ${ctx.participants.join(', ')}`] : []),
     '',
     "Note taker's notes:",
     notes.trim() || '(none)',

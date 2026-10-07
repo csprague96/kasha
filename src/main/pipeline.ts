@@ -8,7 +8,8 @@ import { exportOptions, syncToObsidian } from './obsidian'
 import type { Track } from './recorder'
 import { redact } from './redact'
 import { speakersReady } from './setup'
-import { separateSpeakers } from './speakers'
+import { namesFromRoster, participants, readRoster } from './roster'
+import { separateSpeakers, syncVoices } from './speakers'
 import { whisperPrompt } from './speech'
 import * as store from './store'
 import { carryChecks, speakerGuesses, splitNote, summarize, summaryMarkdown } from './summarizer'
@@ -69,11 +70,18 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
       log('transcribed', { lines: transcript.length, fromLive: !!fromLive, secs: secs() })
 
       // Tell the people on the computer's audio apart, and name voices known from past meetings.
+      // Who the Teams window showed in the call, if it was read (see roster.ts).
+      const timeline = readRoster(id)
+      const people = participants(timeline, store.getSettings().myName)
+      if (people.length) set({ participants: people })
       const sys = tracks.find((t) => t.track === 'sys')
       if (sys && store.getSettings().speakers.separate && speakersReady() && transcript.some((s) => s.speaker === 'others')) {
         set({ status: 'separating' })
         try {
-          const r = await separateSpeakers(id, sys.file, transcript, store.getMeeting(id)?.attendees)
+          // How many voices to expect: the people seen in the call, else the invite list less the note taker.
+          const invited = store.getMeeting(id)?.attendees ?? []
+          const expected = people.length ? Math.min(people.length, 8) : invited.length >= 2 ? Math.min(invited.length - 1, 8) : undefined
+          const r = await separateSpeakers(id, sys.file, transcript, expected)
           transcript = r.transcript
           log('speakers', { found: new Set(transcript.filter((s) => s.speaker !== 'you').map((s) => s.speaker)).size, recognised: Object.keys(r.names).length, secs: secs() })
           store.writeTranscript(id, transcript)
@@ -84,6 +92,18 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
           console.error('speakers:', (e as Error).message)
           log('speakers-failed', { error: (e as Error).message.slice(0, 200) })
         }
+      }
+
+      // Name the voices from the Teams timeline: outright for a one-to-one
+      // call, as guesses to confirm otherwise. Names already given win.
+      if (timeline.length) {
+        const m = store.getMeeting(id)!
+        const r = namesFromRoster(timeline, transcript, m.speakers, store.getSettings().myName)
+        log('teams-named', { people: people.length, named: Object.keys(r.names).length, guessed: Object.keys(r.guesses).length })
+        const speakers = { ...r.guessNames, ...r.names, ...m.speakers }
+        set({ speakers, speakerGuesses: { ...m.speakerGuesses, ...r.guesses } })
+        // Certain names teach Kasha the voice, like a name the user gave. Guesses wait for a yes.
+        if (Object.keys(r.names).length) syncVoices(id, m.speakers, { ...m.speakers, ...r.names })
       }
     } else {
       live?.stop()
@@ -99,7 +119,8 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
           meetingDate: new Date(meeting.recordingStartedAt ?? meeting.createdAt),
           myName: store.getSettings().myName,
           speakers: meeting.speakers,
-          attendees: meeting.attendees
+          attendees: meeting.attendees,
+          participants: meeting.participants
         },
         splitNote(store.readNote(id)).user,
         transcript,

@@ -37,7 +37,11 @@ export interface KashaApi {
   rememberTerm(heard: string, term: string): Promise<void>
   /** Rewrites the summary from the current transcript and speaker names. */
   resummarize(id: string): Promise<void>
-  deleteMeeting(id: string): Promise<void>
+  /**
+   * With `obsidian`, the synced note and its screenshots go to the Recycle Bin
+   * too. `remember` saves the choice as Settings' `obsidian.onDelete`.
+   */
+  deleteMeeting(id: string, opts?: { obsidian?: boolean; remember?: boolean }): Promise<void>
   retry(id: string): Promise<void>
   syncNow(id: string): Promise<void>
   revealInObsidian(id: string): Promise<void>
@@ -124,6 +128,8 @@ export interface BarApi {
   sendChunk(track: 'mic' | 'sys', pcm: ArrayBuffer): void
   captureStarted(tracks: { mic: boolean; sys: boolean }): void
   captureStopped(): void
+  /** A track stopped on its own mid-call (device unplugged, audio service restarted). */
+  captureLost(track: 'mic' | 'sys'): void
   addNote(text: string): Promise<void>
   screenshot(): Promise<void>
   stop(): void
