@@ -16,8 +16,8 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -33,6 +33,11 @@ jobs:
             echo "$version is already released; building only."
             echo "publish=never" >> "$GITHUB_OUTPUT"
           else
+            # A published release needs its tag to exist first; electron-builder doesn't create one.
+            if ! git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null; then
+              git tag "$version"
+              git push origin "$version"
+            fi
             echo "publish=always" >> "$GITHUB_OUTPUT"
           fi
         env:
@@ -41,7 +46,7 @@ jobs:
         run: npm run build && npx electron-builder --win --publish ${{ steps.version.outputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Kasha-Setup
           path: |
