@@ -27,14 +27,15 @@ Settings > Transcription offers three models, all running on this PC: **Quick** 
 
 ### Actions
 
-**Actions** in the sidebar lists open checkboxes from every note, grouped by meeting. Your own come first and everyone else's are listed under **Others**, so you can follow up on them. Ticking an item updates the note and the Obsidian copy; the **×** on an item removes a checkbox that wasn't really an action, from the note and the Obsidian copy. Items ticked in Obsidian show as done in Kasha. Set **Your name** in Settings so actions assigned to you by name count as yours. On weekdays at 09:00 (configurable), a notification lists how many of your actions are open, due today or overdue.
+**Actions** in the sidebar lists open checkboxes from every note, grouped by meeting. Your own come first and everyone else's are listed under **Others**, so you can follow up on them. Ticking an item updates the note and the Obsidian copy; the **×** on an item removes a checkbox that wasn't really an action, from the note and the Obsidian copy. Items ticked in Obsidian show as done in Kasha. Set **Your name** in Settings > Actions so actions assigned to you by name count as yours. On weekdays at 09:00 (configurable), a notification lists how many of your actions are open, due today or overdue.
 
 Due dates are stored in the note as `(due 2026-10-06)`. Shared copies show them as "due Tue 6 Oct".
 
 ### Transcript
 
 - **Speakers**: after the call, the people on the computer's audio are told apart as **Speaker 1**, **Speaker 2** and so on (your mic is always **You**). Select a name at the top of the transcript to rename it everywhere. Select the name on a line to move that line to someone else, or to **Someone else** for a new speaker. The summary uses the names after you select **Update summary**.
-- **Recognising people**: when you name a speaker, Kasha keeps that voice (a short list of numbers, not audio) in `voices.json` on your PC. Next time the same person is on a call, the name is filled in. Settings lists the learned voices and lets you forget one; turn **Recognise people from past meetings** off to stop learning. With the attendee lookup on, the invite list from Outlook is offered when you rename a speaker.
+- **Names from Teams**: while a Teams call is recorded, Kasha reads the meeting window the way a screen reader does (Windows UI Automation): Teams labels each video tile with the person's name and whether they're muted. No captions, bots or calendar access are needed. A one-to-one call names the other voice outright. In a group call, a voice that only talked while one person was unmuted gets that name as a guess (**Name?**) to confirm. Everyone seen in the call shows in the Attendees tab as **In the call**. The reader is a small C# program that Windows' built-in .NET compiler builds on first use (`%APPDATA%\Kasha\bin`); it runs only during Teams recordings, every 2 seconds at low priority (about 45 MB). Turn off **Name people from the Teams window** in Settings > Speakers to stop it.
+- **Recognising people**: when you name a speaker, Kasha keeps that voice (a short list of numbers, not audio) in `voices.json` on your PC. Next time the same person is on a call, the name is filled in. Settings > Speakers lists the learned voices and lets you forget one; turn **Recognise people from past meetings** off to stop learning. With the attendee lookup on, the invite list from Outlook is offered when you rename a speaker.
 - **Edit**: select a line to fix it. Enter saves and Esc cancels. When the edit changes one word, Kasha offers to remember the fix for future meetings.
 - **Correct a word**: right-click a word in the transcript or the note, type how it should be spelled, and it's replaced throughout both. **Fix in future meetings too** (on by default) adds the pair to **Names and terms**.
 - **Find and replace** (Ctrl+H): replaces whole words in the transcript and, optionally, the note. **Fix in future meetings too** adds the correction to **Names and terms**.
@@ -45,11 +46,15 @@ The **Attendees** tab lists who was at the meeting: the invite list (from Outloo
 
 ### Names and terms
 
-In Settings, list people's names and product terms, with what the speech model tends to hear instead (for example **RCVR**, heard as "Recover"). Kasha replaces the misheard forms in every new transcript (and, with a Whisper model, also gives the list to it as spelling hints). Replacement is whole-word and ignores case, so "recover" the verb is changed too. Leave the "heard as" part out for words that are only ever the name. The list is alphabetical, with a filter box and letter headings once it grows.
+In Settings > Names and terms, list people's names and product terms, with what the speech model tends to hear instead (for example **RCVR**, heard as "Recover"). Kasha replaces the misheard forms in every new transcript (and, with a Whisper model, also gives the list to it as spelling hints). Replacement is whole-word and ignores case, so "recover" the verb is changed too. Leave the "heard as" part out for words that are only ever the name. The list is alphabetical, with a filter box and letter headings once it grows.
 
 ### Tags and finding notes
 
 Each note has tags (the summary suggests one to three; add your own under the note, with existing tags offered as you type). Settings > Tags lists every tag in use: rename one to change it on every note, or remove it everywhere. Standing tags (say, `meeting`) go into every note Kasha writes to Obsidian, and the summary's topic tags can be turned off. In the sidebar, the calendar next to the search box marks the days that have notes; pick one to see just that day.
+
+### Deleting a note
+
+The trash button on a note asks before deleting. If the note was synced to Obsidian, it also asks whether to delete the Obsidian copy, which goes to the Recycle Bin along with the screenshots Kasha saved for it. Tick **Remember this decision** to stop being asked. You can change the choice later in Settings > Obsidian, under **When you delete a note in Kasha**.
 
 ### Share
 
@@ -78,7 +83,7 @@ Tell people on the call when you're transcribing.
 - The summary prompt tells the model never to include card numbers, account numbers, SSNs or passwords.
 - Codex use was approved by compliance. Use a company ChatGPT account for it, not a personal one.
 - Audio stays on the device and is deleted once transcribed. With **Keep audio for 7 days** on, it stays on the PC for a week (each note shows when it goes, with **Save a copy** and **Delete now**) and is then deleted automatically.
-- Learned voices are embeddings (192 numbers per meeting per person), not recordings, and never leave `%APPDATA%Kashaoices.json`. They are biometric-like data: tell people on the call when you're transcribing, and turn **Recognise people from past meetings** off if your policy requires it.
+- Learned voices are embeddings (192 numbers per meeting per person), not recordings, and never leave `%APPDATA%\Kasha\voices.json`. They are biometric-like data: tell people on the call when you're transcribing, and turn **Recognise people from past meetings** off if your policy requires it.
 - The speech binaries are pinned by SHA-256, and every model is verified against the hash its publisher lists.
 
 ### Memory use
@@ -87,6 +92,13 @@ Tell people on the call when you're transcribing.
 - Closing the window destroys it; Kasha keeps running in the tray.
 - The prompt and the recording bar are created only when needed and destroyed afterwards.
 - Speech runs one chunk at a time at below-normal priority and exits after each, so no model stays loaded during the call. Speaker separation runs once per call in its own process and exits.
+- When free memory drops under 1 GB during a call, live transcription waits (it starts again above 1.4 GB) and the bar says **transcribing waits for memory**. Select the play button to transcribe anyway; the recording carries on either way, and anything held back is transcribed after the call.
+
+### When something goes wrong
+
+- `%APPDATA%\Kasha\kasha.log` records events and counts only (no titles, names or text): calls detected, recordings started and stopped, memory every 5 minutes while recording, crashed windows and processes, and errors. Crash dumps stay in `%APPDATA%\Kasha\Crashpad`.
+- Audio files stay valid while recording, so a crash loses at most the last few seconds. If Kasha restarts while the same call is still going (within 15 minutes), it carries on recording into the same note instead of asking again; otherwise the note offers **Retry**.
+- If audio capture stops mid-call (a headset unplugged, Windows restarting its audio), the bar restarts it and fills the gap with silence so times still line up.
 
 ## Development
 

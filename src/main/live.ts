@@ -10,10 +10,12 @@ const MIN_NEW = 6 // seconds of new audio before looking for speech again
 const SETTLE = 1.0 // speech this close to the live edge may still be going
 const MAX_OPEN = 25 // a run of speech still going after this long is cut anyway
 const MAX_WAIT = 90_000 // ms; speech waits at most this long for a chunk to fill
-// The speech model peaks at ~550 MB. Below LOW free memory, chunks wait; they
-// start again above HIGH, so it doesn't flap on and off.
-const LOW_MEMORY = 1.5 * 1024 ** 3
-const HIGH_MEMORY = 2 * 1024 ** 3
+// The speech model peaks at ~550 MB (the larger ones more). Below LOW free
+// memory, chunks wait; they start again above HIGH, so it doesn't flap on and
+// off. Teams alone holds 2 GB or more, so on a 16 GB PC free memory often sits
+// around 1.5 GB through a whole call: the line is drawn lower than that.
+const LOW_MEMORY = 1024 ** 3
+const HIGH_MEMORY = 1.4 * 1024 ** 3
 
 interface TrackState {
   file: string
@@ -39,8 +41,12 @@ export class LiveTranscriber {
   private failed: Error | null = null
   private timer: NodeJS.Timeout
   private onProgress: ((p: number) => void) | null = null
+  /** Free memory when the low-memory wait last started or ended, for the log. */
+  freeMB = 0
   private userPaused = false
   private lowMemory = false
+  /** The user chose to transcribe despite low memory, for the rest of this recording. */
+  private ignoreMemory = false
   private finishing = false
   private resumed: (() => void) | null = null
 
@@ -67,8 +73,16 @@ export class LiveTranscriber {
    * is transcribed on resume, or when the call ends.
    */
   setPaused(paused: boolean): void {
-    if (this.userPaused === paused) return
+    // Resuming while it waits for memory means "transcribe anyway". Without
+    // this the button only toggled the user's own pause, and transcribing
+    // never started however often it was pressed.
+    const override = !paused && this.lowMemory
+    if (this.userPaused === paused && !override) return
     this.userPaused = paused
+    if (override) {
+      this.ignoreMemory = true
+      this.lowMemory = false
+    }
     this.changed()
   }
 
@@ -78,9 +92,10 @@ export class LiveTranscriber {
 
   private checkMemory(): void {
     const free = freemem()
-    const low = this.watchMemory() && (this.lowMemory ? free < HIGH_MEMORY : free < LOW_MEMORY)
+    const low = this.watchMemory() && !this.ignoreMemory && (this.lowMemory ? free < HIGH_MEMORY : free < LOW_MEMORY)
     if (low === this.lowMemory) return
     this.lowMemory = low
+    this.freeMB = Math.round(free / 1024 ** 2)
     this.changed()
   }
 

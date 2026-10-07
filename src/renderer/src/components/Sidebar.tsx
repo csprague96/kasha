@@ -177,7 +177,7 @@ export function Sidebar({ meetings, view, settings, openActions, onSelect, onNew
 
       <div className="flex flex-col">
         <div className="flex items-center justify-between gap-1">
-          <SyncLine meetings={meetings} settings={settings} onClick={() => onSelect({ kind: 'settings' })} />
+          <SyncLine meetings={meetings} settings={settings} onClick={() => onSelect({ kind: 'settings', page: 'obsidian' })} />
           <Button
             variant="ghost"
             size="icon"
@@ -189,7 +189,7 @@ export function Sidebar({ meetings, view, settings, openActions, onSelect, onNew
             <SettingsIcon className="text-muted" />
           </Button>
         </div>
-        <VersionLine onOpenSettings={() => onSelect({ kind: 'settings' })} />
+        <VersionLine onOpenSettings={() => onSelect({ kind: 'settings', page: 'general' })} />
       </div>
     </aside>
   )

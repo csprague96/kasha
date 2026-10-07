@@ -49,6 +49,8 @@ export interface Meeting {
   detectedTitle?: string
   /** People invited, from the Outlook calendar when that lookup is on, or added by hand. Names only. */
   attendees?: string[]
+  /** People seen in the call (from the Teams window), not counting the note taker. Names only. */
+  participants?: string[]
   /** Who was there, set by hand where the recording can't tell: by `attendanceKey(name)`. */
   attendance?: Record<string, Presence>
   /**
@@ -155,6 +157,8 @@ export interface Settings {
     separate: boolean
     /** Name speakers whose voice was named in a past meeting. Voices are stored on this PC only. */
     recognize: boolean
+    /** Read who's in a Teams call, and who's muted, from the Teams window (UI Automation) to name speakers. */
+    fromTeams: boolean
   }
   vocabulary: VocabularyEntry[]
   tags: {
@@ -196,6 +200,11 @@ export interface Settings {
     syncOnEnd: boolean
     includeTranscript: boolean
     attachments: boolean
+    /**
+     * What deleting a note in Kasha does to its Obsidian copy. ask: the delete
+     * prompt asks each time. both: it goes too. kasha: it stays in the vault.
+     */
+    onDelete: 'ask' | 'both' | 'kasha'
   }
 }
 
@@ -207,7 +216,7 @@ export const DEFAULT_SETTINGS: Settings = {
   summaryEngine: 'auto',
   myName: '',
   liveTranscription: true,
-  speakers: { separate: true, recognize: true },
+  speakers: { separate: true, recognize: true, fromTeams: true },
   vocabulary: [],
   tags: { defaults: [], fromSummary: true },
   reminders: { enabled: true, time: '09:00' },
@@ -219,7 +228,8 @@ export const DEFAULT_SETTINGS: Settings = {
     fileName: '{date} {title}',
     syncOnEnd: true,
     includeTranscript: false,
-    attachments: true
+    attachments: true,
+    onDelete: 'ask'
   }
 }
 

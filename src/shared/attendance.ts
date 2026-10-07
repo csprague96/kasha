@@ -16,6 +16,8 @@ export interface AttendeeRow {
   /** The speaker's name was guessed from the conversation and not confirmed yet. */
   guessed: boolean
   seconds: number // time spent talking
+  /** Seen in the call in the Teams window, spoken or not. */
+  inCall: boolean
   lines: number
   present: boolean
   /** The user set present or absent by hand. */
@@ -39,6 +41,7 @@ export function attendance(m: Meeting, transcript: TranscriptSegment[], myName: 
   const nameFor = (id: SpeakerId) => (id === 'you' ? m.speakers?.you?.trim() || myName.trim() || 'You' : speakerName(id, m.speakers))
   const marks = m.attendance ?? {}
   const invited = m.attendees ?? []
+  const inCall = new Set((m.participants ?? []).map(normName))
   const used = new Set<SpeakerId>()
 
   const matchSpeaker = (name: string): SpeakerId | undefined => {
@@ -67,7 +70,8 @@ export function attendance(m: Meeting, transcript: TranscriptSegment[], myName: 
       speaker,
       guessed: !!(speaker && m.speakerGuesses?.[speaker]),
       ...t,
-      present: mark ? mark === 'present' : !!speaker,
+      inCall: inCall.has(normName(name)),
+      present: mark ? mark === 'present' : !!speaker || inCall.has(normName(name)),
       manual: !!mark
     })
   }
@@ -83,9 +87,18 @@ export function attendance(m: Meeting, transcript: TranscriptSegment[], myName: 
       speaker,
       guessed: !!m.speakerGuesses?.[speaker],
       ...talk.get(speaker)!,
+      inCall: inCall.has(normName(name)),
       present: mark ? mark === 'present' : true,
       manual: !!mark
     })
+  }
+  // In the call but neither invited nor heard: they listened.
+  const listed = new Set([...rows, ...extra].map((r) => normName(r.name)))
+  for (const name of m.participants ?? []) {
+    if (listed.has(normName(name))) continue
+    listed.add(normName(name))
+    const mark = marks[attendanceKey(name)]
+    extra.push({ name, invited: false, guessed: false, seconds: 0, lines: 0, inCall: true, present: mark ? mark === 'present' : true, manual: !!mark })
   }
   extra.sort((a, b) => Number(b.speaker === 'you') - Number(a.speaker === 'you') || b.seconds - a.seconds)
   return [...rows, ...extra]

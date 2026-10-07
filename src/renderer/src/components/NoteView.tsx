@@ -1,9 +1,10 @@
-import { Download, ExternalLink, Loader2, RefreshCw, Trash2, X } from 'lucide-react'
+import { Download, ExternalLink, Loader2, RefreshCw, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { normTag, type AudioInfo, type Meeting, type RecordingInfo, type Settings, type TranscriptSegment } from '@shared/types'
 import { cn, hhmm, meetingMeta, timer } from '@/lib/utils'
 import { Attendees } from './Attendees'
 import { CorrectWord, type WordAt } from './CorrectWord'
+import { DeleteNote } from './DeleteNote'
 import { Editor } from './Editor'
 import { SharePopover } from './SharePopover'
 import { Transcript } from './Transcript'
@@ -63,7 +64,6 @@ function Title({ meeting }: { meeting: Meeting }) {
 
 function Actions({ meeting, recording, progress, settings, hasTranscript }: Props & { hasTranscript: boolean }) {
   const now = useNow(!!recording)
-  const [confirmDelete, setConfirmDelete] = useState(false)
   const isThis = recording?.meetingId === meeting.id
 
   if (isThis) {
@@ -89,20 +89,6 @@ function Actions({ meeting, recording, progress, settings, hasTranscript }: Prop
       <div className="flex h-9 items-center gap-2 text-[13px] text-muted" role="status">
         <Loader2 className="size-4 animate-spin" />
         <span className="tabular">{label}</span>
-      </div>
-    )
-  }
-
-  if (confirmDelete) {
-    return (
-      <div className="flex items-center gap-2 text-[13px]">
-        <span className="text-muted">Delete this note?</span>
-        <Button variant="destructive" size="sm" onClick={() => void window.kasha.deleteMeeting(meeting.id)}>
-          Delete
-        </Button>
-        <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>
-          Cancel
-        </Button>
       </div>
     )
   }
@@ -134,9 +120,7 @@ function Actions({ meeting, recording, progress, settings, hasTranscript }: Prop
         </Button>
       )}
       <SharePopover meeting={meeting} hasTranscript={hasTranscript} />
-      <Button variant="ghost" size="icon" aria-label="Delete note" title="Delete note" onClick={() => setConfirmDelete(true)}>
-        <Trash2 className="text-muted" />
-      </Button>
+      <DeleteNote meeting={meeting} settings={settings} />
     </div>
   )
 }

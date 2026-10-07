@@ -29,7 +29,9 @@ function Row({ row, meeting, onShowTranscript }: { row: AttendeeRow; meeting: Me
       ? row.guessed
         ? 'Spoke · name guessed'
         : 'Spoke'
-      : 'Not heard'
+      : row.inCall
+        ? 'In the call'
+        : 'Not heard'
   return (
     <li className="group grid grid-cols-[1fr_auto_auto_auto] items-center gap-3 px-3 py-2 text-[13px]">
       <div className="flex min-w-0 items-center gap-2">
@@ -138,6 +140,7 @@ export function Attendees({ meeting, segments, settings, onShowTranscript }: Pro
         {!meeting.attendees?.length && !settings.recording.lookupAttendees && (
           <p>Kasha can fill this list from the meeting's Outlook invite: turn on the attendee lookup in Settings.</p>
         )}
+        {!!meeting.participants?.length && <p>In the call means the Teams window showed them in the meeting, whether or not they spoke.</p>}
         <p>
           Not heard means the person didn't speak on the recording. Someone who listened without speaking looks the same, so mark them
           present by hand. Unnamed speakers are named in the Transcript tab.

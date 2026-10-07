@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  crashReporter,
   desktopCapturer,
   dialog,
   ipcMain,
@@ -16,8 +17,9 @@ import {
   Tray,
   type WebContents
 } from 'electron'
-import { existsSync, writeFileSync } from 'node:fs'
-import { join, normalize, resolve, sep } from 'node:path'
+import { existsSync, statSync, writeFileSync } from 'node:fs'
+import { freemem } from 'node:os'
+import { basename, join, normalize, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { countMatches, findPattern } from '@shared/text'
 import {
@@ -44,9 +46,10 @@ import { lookupMeeting } from './calendar'
 import { log } from './log'
 import { MeetingDetector } from './detector'
 import { getLive, startLive, takeLive, type LiveTranscriber } from './live'
-import { exportFileName, exportOptions, syncToObsidian } from './obsidian'
+import { exportFileName, exportOptions, syncToObsidian, vaultFiles } from './obsidian'
 import { cleanText, enqueue, type PipelineEvents } from './pipeline'
-import { Recording, type Track } from './recorder'
+import { Recording, repairWav, SAMPLE_RATE, type Track } from './recorder'
+import { saveRoster, TeamsRoster } from './roster'
 import { takeScreenshot } from './screenshot'
 import { copyToClipboard, emailDraft, saveMarkdown, savePdf } from './share'
 import { redact } from './redact'
@@ -61,6 +64,14 @@ import { appIcon, createBarWindow, createMainWindow, createToastWindow } from '.
 
 // Dev and testing: keep data in a separate folder so real notes aren't touched.
 if (process.env.KASHA_DATA_DIR) app.setPath('userData', process.env.KASHA_DATA_DIR)
+
+// Crash dumps stay on this PC (%APPDATA%\Kasha\Crashpad); nothing is sent anywhere.
+crashReporter.start({ uploadToServer: false })
+
+/** Error text for the log, without file paths (they can hold meeting titles). */
+const scrub = (e: unknown) => String((e as Error)?.message ?? e).replace(/[A-Za-z]:[\\/][^'"\n]*/g, '<path>').slice(0, 200)
+process.on('uncaughtException', (e) => log('error', { where: 'main', error: scrub(e) }))
+process.on('unhandledRejection', (e) => log('error', { where: 'promise', error: scrub(e) }))
 
 // The UI is simple enough to render on the CPU. Skipping the GPU process saves ~50-100 MB.
 app.disableHardwareAcceleration()
@@ -91,8 +102,28 @@ interface ActiveRecording extends RecordingInfo {
   stopping: boolean
   /** The user said yes to the prompt (not started by a rule or by hand). */
   accepted: boolean
+  /** When capture was restarted, to give up if it keeps happening. */
+  restarts: number[]
+  /** Reads who's in the Teams call, for naming speakers. */
+  roster: TeamsRoster | null
 }
 let recording: ActiveRecording | null = null
+
+/**
+ * Recordings cut off by a crash or by quitting, by app. If the same call is
+ * still going when Kasha is back, recording it carries on in the same note
+ * instead of starting a second one. After a crash that happens without asking.
+ */
+const interrupted = new Map<string, { id: string; at: number; crashed: boolean }>()
+const RESUME_WITHIN_MS = 15 * 60_000
+
+/** The interrupted note for this call, if it's recent and has the same title. */
+function resumable(from: DetectedMeeting): { id: string; crashed: boolean } | null {
+  const cut = interrupted.get(from.app)
+  if (!cut || Date.now() - cut.at > RESUME_WITHIN_MS) return null
+  const prev = store.getMeeting(cut.id)
+  return prev?.status === 'failed' && normName(prev.detectedTitle ?? prev.title) === normName(from.title) ? cut : null
+}
 
 const detector = new MeetingDetector(() => store.getSettings().detect)
 
@@ -202,10 +233,17 @@ function ruleTitle(title: string, match?: CalendarMatch | null): string | null {
   return match?.subject && !GENERIC_TITLE.test(match.subject) ? match.subject : null
 }
 
-/** A past meeting had the same title. Call before creating this one's note. */
+/**
+ * A meeting with the same title was recorded on an earlier day. Notes from
+ * earlier today don't count: after a restart mid-call, the same call has a
+ * note already, and that once made a one-off meeting look like a series.
+ */
 function seenBefore(title: string): boolean {
   if (GENERIC_TITLE.test(title)) return false
-  return store.listMeetings().some((m) => normName(m.detectedTitle ?? m.title) === normName(title))
+  const today = new Date().setHours(0, 0, 0, 0)
+  return store
+    .listMeetings()
+    .some((m) => Date.parse(m.recordingStartedAt ?? m.createdAt) < today && normName(m.detectedTitle ?? m.title) === normName(title))
 }
 
 /** Whether to offer "always record this one": not already a rule, and not turned down before. */
@@ -257,7 +295,9 @@ function refreshTray(): void {
         ? [
             liveState().paused === 'user'
               ? { label: 'Resume transcribing', click: () => setLivePaused(false) }
-              : { label: 'Pause transcribing', click: () => setLivePaused(true) }
+              : liveState().paused === 'memory'
+                ? { label: 'Transcribe now (memory is low)', click: () => setLivePaused(false) }
+                : { label: 'Pause transcribing', click: () => setLivePaused(true) }
           ]
         : []),
       { label: 'Actions', click: () => showMain({ actions: true }) },
@@ -278,22 +318,37 @@ interface StartOptions {
   auto?: boolean
   /** The user said yes to the prompt. */
   accepted?: boolean
+  /** Carrying on a recording a crash cut off, in the same call: the gap is filled with silence. */
+  resume?: boolean
 }
 
 async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: StartOptions = {}): Promise<void> {
   if (recording) return
+  let resume = !!opts.resume
+  const cut = !meetingId && from ? resumable(from) : null
+  if (cut && from) {
+    meetingId = cut.id
+    resume = true
+    interrupted.delete(from.app)
+  }
   let meeting = meetingId ? store.getMeeting(meetingId) : null
   if (!meeting) {
     meeting = store.createMeeting({ title: from?.title ?? 'New note', app: from?.app ?? 'manual' })
     if (from) meeting = store.updateMeeting(meeting.id, { detectedTitle: from.title })
   }
-  const startedAt = Date.now()
+  // A recording cut off by a crash carries on in the same files, never over them.
+  const leftover = meeting.status === 'failed' && !!audioInfo(meeting.id) && !store.readTranscript(meeting.id).length
+  const rec = new Recording(store.paths.meeting(meeting.id), resume || leftover)
+  const had = Math.max(0, ...Object.values(rec.lengths())) / 2 / SAMPLE_RATE
+  // The clock carries on from the first part, so note timestamps match the audio.
+  const startedAt = resume && meeting.recordingStartedAt ? Date.parse(meeting.recordingStartedAt) : Date.now() - had * 1000
+  if (resume) rec.padTo((Date.now() - startedAt) / 1000)
   meeting = store.updateMeeting(meeting.id, {
     status: 'recording',
     recordingStartedAt: new Date(startedAt).toISOString(),
+    recordingEndedAt: undefined,
     error: undefined
   })
-  const rec = new Recording(store.paths.meeting(meeting.id))
   const settings = store.getSettings()
   const id = meeting.id
   const live =
@@ -306,29 +361,92 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
           () => store.getSettings().recording.pauseWhenLowMemory,
           (state) => {
             if (recording?.meetingId !== id) return
-            log('transcribing', { paused: state.paused ?? 'no' })
+            log('transcribing', { paused: state.paused ?? 'no', freeMB: getLive(id)?.freeMB })
             broadcast('live-state', state)
             refreshTray()
           }
         )
       : null
-  recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted }
-  log('recording-started', { app: meeting.app, how: opts.auto ? 'auto' : opts.accepted ? 'prompt' : 'manual', live: !!live })
+  // Live transcription starts again from the top of what's already recorded.
+  for (const [track, bytes] of Object.entries(rec.lengths())) live?.wrote(track as Track, bytes)
+  // A Teams call (detected, or recorded by hand while one is on): read who's in it.
+  const roster = settings.speakers.fromTeams && (meeting.app === 'teams' || detector.isLive('teams')) ? new TeamsRoster(startedAt) : null
+  void roster?.start()
+  recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted, restarts: [], roster }
+  log('recording-started', { app: meeting.app, how: resume ? 'resume' : opts.auto ? 'auto' : opts.accepted ? 'prompt' : 'manual', live: !!live, carriedOnMin: had ? Math.round(had / 60) : undefined })
   closeToast()
-  if (opts.auto && Notification.isSupported()) {
-    const n = new Notification({ title: 'Recording', body: `${meeting.title}. Kasha started automatically. Stop it from the bar.`, silent: true })
+  if ((opts.auto || resume) && Notification.isSupported()) {
+    const body = resume
+      ? `${meeting.title}. Kasha restarted and carried on recording into the same note.`
+      : `${meeting.title}. Kasha started automatically. Stop it from the bar.`
+    const n = new Notification({ title: 'Recording', body, silent: true })
     n.on('click', () => showMain({ meetingId: id }))
     n.show()
   }
   // Who was invited: for naming speakers and the summary.
-  const calendar = (from && lookups.get(from.app)) ?? (settings.recording.lookupAttendees ? lookupMeeting(meeting.title) : null)
+  const known = resume && meeting.attendees?.length
+  const calendar = (from && lookups.get(from.app)) ?? (settings.recording.lookupAttendees && !known ? lookupMeeting(meeting.title) : null)
   if (from) lookups.delete(from.app)
   if (calendar) void calendar.then((match) => onCalendar(id, match))
-  barWin = createBarWindow()
-  barWin.on('closed', () => (barWin = null))
+  openBar()
+  startMemoryLog()
   refreshTray()
   broadcast('recording-changed', recordingInfo())
   broadcast('meetings-changed')
+}
+
+/** The bar hosts audio capture, so opening it starts capturing. */
+function openBar(): void {
+  const win = createBarWindow()
+  barWin = win
+  win.on('closed', () => barWin === win && (barWin = null))
+}
+
+/**
+ * Capture stopped while recording: the bar's renderer crashed, or a device
+ * went away (a headset unplugged, Windows' audio service restarted). A fresh
+ * bar captures again into the same files, after silence for the gap. Limited,
+ * so a fault that keeps happening can't spin.
+ */
+function restartCapture(reason: string): void {
+  if (!recording || recording.stopping) return
+  const now = Date.now()
+  recording.restarts = recording.restarts.filter((t) => now - t < 10 * 60_000)
+  if (recording.restarts.length >= 5) {
+    log('capture-gave-up', { reason })
+    store.updateMeeting(recording.meetingId, { error: 'Audio capture kept stopping, so Kasha stopped recording. What was recorded is kept.' })
+    return finalizeRecording()
+  }
+  recording.restarts.push(now)
+  const added = recording.rec.padTo((now - recording.startedAt) / 1000)
+  for (const [track, bytes] of Object.entries(added)) recording.live?.wrote(track as Track, bytes)
+  log('capture-restarted', { reason, gapSecs: Math.round(Math.max(0, ...Object.values(added)) / 2 / SAMPLE_RATE) })
+  const old = barWin
+  barWin = null
+  if (old && !old.isDestroyed()) old.destroy()
+  openBar()
+}
+
+/** While recording, memory use every 5 minutes, so a slow PC or a crash can be traced. Counts only. */
+let memoryTimer: NodeJS.Timeout | null = null
+function startMemoryLog(): void {
+  if (memoryTimer) return
+  const sample = () => {
+    if (!recording) {
+      if (memoryTimer) clearInterval(memoryTimer)
+      memoryTimer = null
+      return
+    }
+    const kasha = app.getAppMetrics().reduce((t, p) => t + p.memory.workingSetSize, 0) / 1024
+    log('memory', {
+      minutes: Math.round((Date.now() - recording.startedAt) / 60_000),
+      freeMB: Math.round(freemem() / 1024 ** 2),
+      kashaMB: Math.round(kasha),
+      mainMB: Math.round(process.memoryUsage().rss / 1024 ** 2),
+      transcribing: recording.live?.state().paused ?? 'yes'
+    })
+  }
+  memoryTimer = setInterval(sample, 5 * 60_000)
 }
 
 /** Asks the bar to flush its last audio, then finalizes. Falls back after 3s. */
@@ -356,10 +474,11 @@ const pipelineEvents: PipelineEvents = {
 
 function finalizeRecording(): void {
   if (!recording) return
-  const { meetingId, rec, startedAt } = recording
+  const { meetingId, rec, startedAt, roster } = recording
   recording = null
   const tracks = rec.close()
-  log('recording-stopped', { tracks: tracks.join('+') || 'none', minutes: Math.round((Date.now() - startedAt) / 60_000) })
+  if (roster) saveRoster(meetingId, roster.stop())
+  log('recording-stopped', { tracks: tracks.map((t) => t.track).join('+') || 'none', minutes: Math.round((Date.now() - startedAt) / 60_000) })
   store.updateMeeting(meetingId, {
     recordingEndedAt: new Date().toISOString(),
     status: tracks.length ? 'transcribing' : 'ready',
@@ -381,7 +500,13 @@ function finalizeRecording(): void {
 function onCalendar(id: string, match: CalendarMatch | null): void {
   log('attendees', { found: !!match, people: match?.attendees.length, recurring: match?.recurring })
   const cur = store.getMeeting(id)
-  if (!match || !cur) return
+  if (!cur) return
+  if (!match) {
+    // Not in the calendar: a title seen on an earlier day is the only sign of a series.
+    const title = cur.detectedTitle ?? cur.title
+    if (recording?.meetingId === id && recording.accepted && !toast && seenBefore(title) && worthOffering(title)) showToast({ kind: 'recurring', title })
+    return
+  }
   const patch: Partial<Meeting> = { attendees: match.attendees }
   if (match.subject && GENERIC_TITLE.test(cur.title)) patch.title = match.subject.slice(0, 200)
   store.updateMeeting(id, patch)
@@ -392,7 +517,8 @@ function onCalendar(id: string, match: CalendarMatch | null): void {
     broadcast('recording-changed', recordingInfo())
     refreshTray()
   }
-  // A recurring series the user said yes to: offer to always record it.
+  // A recurring series the user said yes to: offer to always record it. The
+  // calendar knows whether it's a series, so its answer wins over the title.
   const title = ruleTitle(cur.detectedTitle ?? cur.title, match)
   if (recording.accepted && match.recurring && !toast && worthOffering(title)) showToast({ kind: 'recurring', title })
 }
@@ -431,6 +557,12 @@ async function onDetected(m: DetectedMeeting): Promise<void> {
   const r = settings.recording
   log('call-detected', { app: m.app, mode: r.mode, recording: !!recording, dismissed: dismissed.has(m.app), setup: settings.setupComplete })
   if (recording || dismissed.has(m.app) || !settings.setupComplete) return
+  // Kasha crashed during this call: carry on recording it without asking again.
+  const cut = resumable(m)
+  if (cut?.crashed) {
+    log('call-resumed', { app: m.app, gapSecs: Math.round((Date.now() - interrupted.get(m.app)!.at) / 1000) })
+    return startRecording(undefined, m)
+  }
   if (neverRecords(m.title)) return log('call-skipped', { app: m.app })
   // Started now so the invite list is ready by the time it's needed.
   const calendar = r.lookupAttendees ? lookupMeeting(m.title) : Promise.resolve(null)
@@ -602,10 +734,26 @@ function registerIpc(): void {
     if (!m || (m.status !== 'ready' && m.status !== 'failed') || !store.readTranscript(id).length) return
     enqueue(id, pipelineEvents)
   })
-  handle('meetings:delete', (id: string) => {
+  handle('meetings:delete', async (id: string, opts?: { obsidian?: boolean; remember?: boolean }) => {
     if (recording?.meetingId === id) return
+    const m = store.getMeeting(id)
+    // Obsidian first, to the Recycle Bin: if that fails the note stays in Kasha and can be tried again.
+    if (m && opts?.obsidian) {
+      for (const file of vaultFiles(m, store.readNote(id))) {
+        try {
+          await shell.trashItem(file)
+        } catch (err) {
+          log('obsidian-delete-failed', { error: (err as NodeJS.ErrnoException).code ?? 'unknown' })
+          throw new Error(`Couldn't remove ${basename(file)} from Obsidian. Is it open in another app?`)
+        }
+      }
+    }
     store.deleteMeeting(id)
     broadcast('meetings-changed')
+    if (opts?.remember) {
+      const ob = store.getSettings().obsidian
+      broadcast('settings-changed', store.setSettings({ obsidian: { ...ob, onDelete: opts.obsidian ? 'both' : 'kasha' } }))
+    }
   })
   handle('meetings:retry', (id: string) => enqueue(id, pipelineEvents))
   handle('meetings:sync', (id: string) => {
@@ -711,9 +859,10 @@ function registerIpc(): void {
     if (t?.kind === 'recurring') return addToRule('meetings', t.title)
     if (t?.kind !== 'detected') return
     const d = t.meeting
-    const recurring = seenBefore(d.title)
+    // With the calendar on, the offer waits for it (see onCalendar).
+    const lookup = lookups.has(d.app)
     await startRecording(undefined, d, { accepted: true })
-    if (recurring && worthOffering(d.title)) showToast({ kind: 'recurring', title: d.title })
+    if (!lookup && seenBefore(d.title) && worthOffering(d.title)) showToast({ kind: 'recurring', title: d.title })
   })
   ipcMain.on('toast:dismiss', (e) => {
     if (!isOwnWindow(e.sender)) return
@@ -754,6 +903,10 @@ function registerIpc(): void {
     }
   })
   ipcMain.on('bar:captureStopped', () => finalizeRecording())
+  // Capture lost a track mid-call (see restartCapture).
+  ipcMain.on('bar:captureLost', (e, track: string) => {
+    if (e.sender.id === barWin?.webContents.id) restartCapture(`${track === 'mic' ? 'mic' : 'sys'}-ended`)
+  })
   handle('bar:addNote', (text: string) => {
     if (!recording || !text.trim()) return
     appendToNote(recording.meetingId, `\`${elapsedLabel()}\` ${text.trim()}`)
@@ -795,13 +948,28 @@ app.on('second-instance', () => showMain())
 // Kasha lives in the tray. Closing windows frees their memory but keeps it running.
 app.on('window-all-closed', () => undefined)
 
+// A crashed window is logged; the bar is replaced so recording carries on.
+app.on('render-process-gone', (_e, wc, d) => {
+  const which = wc.id === barWin?.webContents.id ? 'bar' : wc.id === mainWin?.webContents.id ? 'main' : 'other'
+  log('window-crashed', { window: which, reason: d.reason, exitCode: d.exitCode })
+  if (which === 'bar') restartCapture('bar-crashed')
+  else if (which === 'main' && mainWin && !mainWin.isDestroyed()) mainWin.reload()
+})
+app.on('child-process-gone', (_e, d) => {
+  log('process-gone', { type: d.type, name: d.name ?? d.serviceName, reason: d.reason, exitCode: d.exitCode })
+  // Windows' audio capture runs in Chromium's audio service: when it dies, capture has to start again.
+  if (d.type === 'Utility' && d.reason !== 'clean-exit' && /audio/i.test(`${d.name ?? ''} ${d.serviceName ?? ''}`)) restartCapture('audio-service')
+})
+
 app.on('before-quit', () => {
+  log('app-quit', { recording: !!recording })
   detector.stop()
   updater.stop()
   if (recording) {
     // Close files cleanly so the audio can still be processed next time.
-    const { meetingId, rec } = recording
+    const { meetingId, rec, roster } = recording
     rec.close()
+    if (roster) saveRoster(meetingId, roster.stop())
     takeLive(meetingId)?.stop()
     store.updateMeeting(meetingId, { status: 'failed', error: 'Kasha quit during recording. Select Retry to process the audio.', recordingEndedAt: new Date().toISOString() })
     recording = null
@@ -834,7 +1002,16 @@ app.whenReady().then(() => {
   // Recover meetings left mid-pipeline by a crash or restart.
   for (const m of store.listMeetings()) {
     if (m.status === 'recording') {
+      // Kasha crashed mid-recording. The files are fixed up so Retry (or carrying on) can read them.
+      const files = (['mic', 'sys'] as Track[]).map((t) => join(store.paths.meeting(m.id), 'audio', `${t}.wav`)).filter((f) => existsSync(f))
+      files.forEach(repairWav)
+      const at = Math.max(0, ...files.map((f) => statSync(f).mtimeMs))
+      if (m.app !== 'manual' && at) interrupted.set(m.app, { id: m.id, at, crashed: true })
+      log('recording-interrupted', { app: m.app, minutesAgo: at ? Math.round((Date.now() - at) / 60_000) : undefined })
       store.updateMeeting(m.id, { status: 'failed', error: 'Recording was interrupted. Select Retry to process the audio.' })
+    } else if (m.status === 'failed' && m.app !== 'manual' && m.error?.startsWith('Kasha quit during recording') && m.recordingEndedAt) {
+      // Quit mid-call: if the call is still on and the user records it again, it goes in this note.
+      interrupted.set(m.app, { id: m.id, at: Date.parse(m.recordingEndedAt), crashed: false })
     } else if (m.status === 'transcribing' || m.status === 'separating' || m.status === 'summarizing') {
       enqueue(m.id, pipelineEvents)
     }

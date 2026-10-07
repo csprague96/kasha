@@ -22,8 +22,12 @@ async function startCapture(): Promise<Capture> {
   const streams: MediaStream[] = []
   const nodes: AudioWorkletNode[] = []
 
+  let stopping = false
   const attach = (stream: MediaStream, track: 'mic' | 'sys') => {
     streams.push(stream)
+    // A track that ends by itself (a headset unplugged, Windows restarting audio)
+    // would leave silence for the rest of the call: the main process restarts capture.
+    for (const t of stream.getAudioTracks()) t.onended = () => !stopping && window.bar.captureLost(track)
     const src = ctx.createMediaStreamSource(stream)
     const node = new AudioWorkletNode(ctx, 'pcm-capture', {
       channelCount: 1,
@@ -66,6 +70,7 @@ async function startCapture(): Promise<Capture> {
 
   return {
     async stop() {
+      stopping = true
       await Promise.all(
         nodes.map(
           (n) =>
@@ -153,7 +158,7 @@ function Bar() {
     paused === 'user'
       ? 'Resume transcribing'
       : paused === 'memory'
-        ? 'Transcribing is waiting for free memory. Select to pause it until you resume.'
+        ? 'Transcribing is waiting for free memory. Select to transcribe now anyway (the PC may slow down). Recording carries on either way.'
         : 'Pause transcribing. Recording carries on; the transcript catches up later.'
 
   return (
@@ -183,19 +188,20 @@ function Bar() {
             className={cn('min-w-0 flex-1 truncate text-left [-webkit-app-region:no-drag]', flash && 'text-muted')}
           >
             {flash ?? info.title}
-            {!flash && paused && <span className="text-muted"> · transcribing paused</span>}
+            {!flash && paused === 'user' && <span className="text-muted"> · transcribing paused</span>}
+            {!flash && paused === 'memory' && <span className="text-muted"> · transcribing waits for memory</span>}
           </button>
         )}
 
         {live?.available && (
           <button
             className={cn(pill, 'inline-flex items-center px-1.5 hover:bg-sidebar', paused && 'border-foreground')}
-            onClick={() => window.bar.setPaused(paused !== 'user')}
+            onClick={() => window.bar.setPaused(!paused)}
             title={pauseLabel}
             aria-label={pauseLabel}
-            aria-pressed={paused === 'user'}
+            aria-pressed={!!paused}
           >
-            {paused === 'user' ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
+            {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
           </button>
         )}
 
