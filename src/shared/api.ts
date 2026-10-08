@@ -82,6 +82,8 @@ export interface KashaApi {
   // Voices learned from named speakers
   listVoices(): Promise<VoiceProfile[]>
   removeVoice(name: string): Promise<void>
+  /** Forgets every learned voice and every meeting's voiceprints. */
+  forgetAllVoices(): Promise<void>
 
   // The app itself
   appInfo(): Promise<AppInfo>

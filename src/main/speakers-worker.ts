@@ -27,21 +27,35 @@ export interface SpeakerRequest {
    */
   expected?: number
   /**
-   * How many other people were in the call (seen in the Teams window). Unlike
-   * the invite, that's an upper bound: voices beyond it are pieces of someone
-   * already found, and the most alike are joined until there are no more.
+   * How many other people were in the call (seen in the Teams window). Voices
+   * beyond it are probably pieces of someone already found, and are joined to
+   * the voice most like them when they sound alike (see consolidate).
    */
   max?: number
+  /** For measuring only: overrides WINDOW_SHIFT. */
+  windowShift?: number
 }
 
 export interface SpeakerCluster {
   segments: Array<{ start: number; end: number }>
   seconds: number
   embedding: number[]
+  /** Joined only to fit the head count: it may be two people, so it's never learned as a voice. */
+  capped?: boolean
+}
+
+/** Seconds spent in each step, for the log. */
+export interface SpeakerTimings {
+  diarize: number
+  windows: number
+  group: number
+  voiceprints: number
+  windowCount: number
 }
 
 export interface SpeakerResponse {
   clusters?: SpeakerCluster[]
+  timings?: SpeakerTimings
   error?: string
 }
 
@@ -59,6 +73,11 @@ const BLOCK = 15 * 60 // seconds of speech analysed at once
  * people) and 0.4-0.7 (same person), with the valley at 0.2-0.3.
  */
 const CLUSTER_THRESHOLD = 0.5 // pyannote's grouping; only its turn boundaries are used
+// pyannote looks at 10 s of audio at a time. sherpa moves that window by 1 s
+// (0.1) by default and takes a voiceprint per window and speaker, all for a
+// grouping Kasha replaces with its own: most of the work, thrown away. Moving
+// it by 5 s still finds the turns, which Kasha cuts into 2.5 s windows anyway.
+const WINDOW_SHIFT = 0.5
 const WINDOW = 2.5 // seconds of speech per voiceprint; long turns can hide a change of speaker
 const MIN_WINDOW = 1.0 // shorter turns are too short for a voiceprint; they follow the nearest window
 const CUT = 0.3 // windows grouped while their average similarity is at least this
@@ -66,8 +85,8 @@ const CUT = 0.3 // windows grouped while their average similarity is at least th
 // that appear. Beyond 0.45 the voiceprints shatter into fragments.
 const CUTS = [CUT, 0.4]
 const SUBSTANTIAL = 20 // seconds of speech for a group to count as a person
-const SAME = 0.7 // groups this alike are one person even when more are expected
 const MERGE = 0.4 // clusters at least this similar are the same person; split pieces of one voice rejoin here
+const CAP_FLOOR = 0.35 // the head-count cap only joins voices at least this alike (different people reached 0.32)
 const TINY = 4 // clusters with less speech than this join their nearest voice…
 const TINY_MATCH = 0.3 // …if it sounds at least this alike. Otherwise they're someone who said little.
 const CRUMB = 2.5 // less than this always joins its nearest voice: a 60-minute call left four 1-2 s "speakers"
@@ -216,14 +235,18 @@ function groupWithHint(vectors: number[][], lengths: number[], expected?: number
 
 /**
  * Merges clusters that are the same voice, then folds tiny ones into their
- * nearest. With an expected head count, alike clusters stop merging once
- * there are that many people, unless they're near-identical.
+ * nearest. With `max` (people seen in the call), substantial voices beyond it
+ * are joined to the voice most like them, but only if they sound alike
+ * (CAP_FLOOR): different people measured up to 0.32 on a real call, so a
+ * short head count (a dial-in, a room system, a cut-off gallery) must not
+ * merge them. Voices a cap merge made are marked `capped`, and never learned.
  */
-function consolidate(clusters: SpeakerCluster[], expected?: number, max?: number): SpeakerCluster[] {
-  const join = (into: SpeakerCluster, from: SpeakerCluster): SpeakerCluster => ({
+export function consolidate(clusters: SpeakerCluster[], max?: number): SpeakerCluster[] {
+  const join = (into: SpeakerCluster, from: SpeakerCluster, capped = false): SpeakerCluster => ({
     segments: [...into.segments, ...from.segments].sort((x, y) => x.start - y.start),
     seconds: into.seconds + from.seconds,
-    embedding: average(into.embedding, into.seconds, from.embedding, from.seconds)
+    embedding: average(into.embedding, into.seconds, from.embedding, from.seconds),
+    capped: capped || into.capped || from.capped
   })
   let list = clusters.slice()
   for (;;) {
@@ -231,8 +254,7 @@ function consolidate(clusters: SpeakerCluster[], expected?: number, max?: number
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         const score = cosine(list[i].embedding, list[j].embedding)
-        const enough = !!expected && people(list.map((c) => c.seconds)) <= expected
-        if (score >= (enough ? SAME : MERGE) && (!best || score > best.score)) best = { i, j, score }
+        if (score >= MERGE && (!best || score > best.score)) best = { i, j, score }
       }
     }
     if (!best) break
@@ -252,31 +274,38 @@ function consolidate(clusters: SpeakerCluster[], expected?: number, max?: number
     }
     list = [...big, ...kept]
   }
-  // No more voices than people in the call.
-  while (max && max > 0 && list.length > max) {
-    let best = { i: 0, j: 1, score: -Infinity }
+  // No more people than were in the call. Only voices with real speech count
+  // (a few seconds of someone isn't a person to merge away), and only voices
+  // that sound alike are joined: if none do, the extra voice stays, since it
+  // may be someone Teams didn't show.
+  while (max && max > 0 && people(list.map((c) => c.seconds)) > max) {
+    let best: { i: number; j: number; score: number } | null = null
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
+        if (list[i].seconds < SUBSTANTIAL || list[j].seconds < SUBSTANTIAL) continue
         const score = cosine(list[i].embedding, list[j].embedding)
-        if (score > best.score) best = { i, j, score }
+        if (score >= CAP_FLOOR && (!best || score > best.score)) best = { i, j, score }
       }
     }
-    const merged = join(list[best.i], list[best.j])
-    list = list.filter((_, k) => k !== best.i && k !== best.j)
+    if (!best) break
+    const merged = join(list[best.i], list[best.j], true)
+    list = list.filter((_, k) => k !== best!.i && k !== best!.j)
     list.push(merged)
   }
   return list.sort((a, b) => a.segments[0].start - b.segments[0].start)
 }
 
-export function separate(req: SpeakerRequest): SpeakerCluster[] {
+export function separate(req: SpeakerRequest): { clusters: SpeakerCluster[]; timings: SpeakerTimings } {
+  const timings: SpeakerTimings = { diarize: 0, windows: 0, group: 0, voiceprints: 0, windowCount: 0 }
+  const since = (t: number) => (Date.now() - t) / 1000
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const sherpa = require('sherpa-onnx-node')
   const length = (statSync(req.wav).size - 44) / 2 / RATE
   const spans = mergeSpans(req.spans, length)
-  if (!spans.length) return []
+  if (!spans.length) return { clusters: [], timings }
 
   const diarizer = new sherpa.OfflineSpeakerDiarization({
-    segmentation: { pyannote: { model: req.segmentationModel }, numThreads: req.threads },
+    segmentation: { pyannote: { model: req.segmentationModel, windowShiftRatio: req.windowShift ?? WINDOW_SHIFT }, numThreads: req.threads },
     embedding: { model: req.embeddingModel, numThreads: req.threads },
     clustering: { numClusters: -1, threshold: CLUSTER_THRESHOLD },
     minDurationOn: 0.3,
@@ -319,7 +348,10 @@ export function separate(req: SpeakerRequest): SpeakerCluster[] {
     const short: Span[][] = []
     for (const pieces of layout(spans)) {
       const audio = audioFor(fd, pieces)
+      let t = Date.now()
       const found: Span[] = diarizer.process(audio)
+      timings.diarize += since(t)
+      t = Date.now()
       // Cut turns into windows and take a voiceprint of each.
       for (const f of found) {
         const len = f.end - f.start
@@ -340,9 +372,13 @@ export function separate(req: SpeakerRequest): SpeakerCluster[] {
           windows.push({ segs, seconds: w, v: Array.from(extractor.compute(stream, false) as Float32Array) })
         }
       }
+      timings.windows += since(t)
     }
-    if (!windows.length) return []
+    timings.windowCount = windows.length
+    if (!windows.length) return { clusters: [], timings }
+    let t = Date.now()
     const group = groupWithHint(windows.map((w) => w.v), windows.map((w) => w.seconds), req.expected)
+    timings.group = since(t)
     // Turns too short for a voiceprint go with the nearest window in time.
     const nearest = (segs: Span[]) => {
       const s = { start: segs[0].start, end: segs[segs.length - 1].end }
@@ -364,6 +400,7 @@ export function separate(req: SpeakerRequest): SpeakerCluster[] {
     }
     windows.forEach((w, i) => add(group[i], w.segs))
     for (const segs of short) add(nearest(segs), segs)
+    t = Date.now()
     const clusters: SpeakerCluster[] = []
     for (const segments of byId.values()) {
       segments.sort((a, b) => a.start - b.start)
@@ -371,7 +408,9 @@ export function separate(req: SpeakerRequest): SpeakerCluster[] {
       if (seconds < 0.5) continue
       clusters.push({ segments, seconds, embedding: embeddingOf(segments) })
     }
-    return consolidate(clusters, req.expected, req.max)
+    const merged = consolidate(clusters, req.max)
+    timings.voiceprints = since(t)
+    return { clusters: merged, timings }
   } finally {
     closeSync(fd)
   }
@@ -386,7 +425,7 @@ function respond(res: SpeakerResponse): void {
 
 function handle(req: SpeakerRequest): void {
   try {
-    respond({ clusters: separate(req) })
+    respond(separate(req))
   } catch (e) {
     respond({ error: (e as Error).message })
   }
@@ -395,7 +434,7 @@ function handle(req: SpeakerRequest): void {
 
 if (process.parentPort) {
   process.parentPort.once('message', (e: { data: SpeakerRequest }) => handle(e.data))
-} else if (process.argv[2]) {
+} else if (process.argv[2]?.endsWith('.json')) {
   // Standalone, for tests: node speakers-worker.js request.json
   handle(JSON.parse(readFileSync(process.argv[2], 'utf8')) as SpeakerRequest)
 }

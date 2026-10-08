@@ -3,12 +3,23 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DEFAULT_SETTINGS, type Meeting, type Settings, type TranscriptSegment } from '@shared/types'
+import { redact, redactLines } from './redact'
+
+/**
+ * Meeting ids come back from the windows over IPC: only a plain folder name
+ * ("2026-10-07-1300-32da08") is accepted, so an id can never point outside
+ * the meetings folder before a write or a recursive delete.
+ */
+function meetingId(id: string): string {
+  if (typeof id !== 'string' || !/^[\w-]{1,64}$/.test(id)) throw new Error('Not a meeting id.')
+  return id
+}
 
 export const paths = {
   root: () => app.getPath('userData'),
   settings: () => join(app.getPath('userData'), 'settings.json'),
   meetings: () => join(app.getPath('userData'), 'meetings'),
-  meeting: (id: string) => join(app.getPath('userData'), 'meetings', id),
+  meeting: (id: string) => join(app.getPath('userData'), 'meetings', meetingId(id)),
   bin: () => join(app.getPath('userData'), 'whisper')
 }
 
@@ -122,16 +133,21 @@ export function readNote(id: string): string {
   }
 }
 
+/** Card numbers, SSNs and security codes never reach disk (PCI): typed notes, bar notes and summaries alike. */
 export function writeNote(id: string, markdown: string): void {
-  writeAtomic(join(paths.meeting(id), 'note.md'), markdown)
+  writeAtomic(join(paths.meeting(id), 'note.md'), redact(markdown))
 }
 
 export function readTranscript(id: string): TranscriptSegment[] {
   return readJson<TranscriptSegment[]>(join(paths.meeting(id), 'transcript.json'), [])
 }
 
-export function writeTranscript(id: string, segs: TranscriptSegment[]): void {
-  writeAtomic(join(paths.meeting(id), 'transcript.json'), JSON.stringify(segs, null, 1))
+/** Redacted line by line and across a speaker's nearby lines, whoever writes it (see redact.ts). */
+export function writeTranscript(id: string, segs: TranscriptSegment[]): TranscriptSegment[] {
+  const out = redactLines(segs)
+  writeAtomic(join(paths.meeting(id), 'transcript.json'), JSON.stringify(out, null, 1))
+  // What was written: callers carry on with this, not their unredacted copy.
+  return out
 }
 
 export function deleteMeeting(id: string): void {

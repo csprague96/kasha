@@ -59,6 +59,10 @@ export interface Meeting {
    * guess until the user confirms it, and says why.
    */
   speakerGuesses?: Partial<Record<SpeakerId, { evidence: string }>>
+  /** Who's who has been worked out (voices told apart, names offered), so it isn't done again. */
+  separated?: boolean
+  /** The summary couldn't be written (the error says why); the note offers Update summary. */
+  summaryFailed?: boolean
   /** Speakers were renamed or the transcript changed after the summary was written. */
   summaryOutdated?: boolean
   tags: string[]
@@ -96,6 +100,15 @@ export function speakerName(id: SpeakerId, names?: Meeting['speakers']): string 
   if (id === 'you') return 'You'
   if (id === 'others') return 'Others'
   return `Speaker ${id.slice(1)}`
+}
+
+/**
+ * A speaker's name for notes and exports: a guess the user hasn't confirmed
+ * yet keeps its question mark, so it isn't passed on as fact.
+ */
+export function shownName(id: SpeakerId, m: Pick<Meeting, 'speakers' | 'speakerGuesses'>): string {
+  const name = speakerName(id, m.speakers)
+  return m.speakerGuesses?.[id] && m.speakers?.[id]?.trim() ? `${name}?` : name
 }
 
 /** A name or term to spell right. Whisper gets it as a hint, and misheard forms are replaced. */

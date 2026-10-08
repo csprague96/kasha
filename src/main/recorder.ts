@@ -81,6 +81,8 @@ const TRACKS: Track[] = ['sys', 'mic']
 /** One recording session: your mic and the computer's audio as separate tracks. */
 export class Recording {
   private writers: Partial<Record<Track, WavWriter>> = {}
+  /** Tracks to line up with the clock again when their audio next arrives (after capture restarted). */
+  private pending = new Set<Track>()
   readonly dir: string
 
   /** With `resume`, carries on the tracks already in the folder instead of starting over. */
@@ -127,6 +129,25 @@ export class Recording {
       added[track] = gap
     }
     return added
+  }
+
+  /**
+   * Silence at the start of a track that hasn't had any audio yet, so its
+   * first sound sits at `seconds` into the recording. Returns the bytes added.
+   */
+  lead(track: Track, seconds: number): number {
+    const w = this.writers[track]
+    if (w && !this.pending.has(track)) return 0
+    this.pending.delete(track)
+    const bytes = Math.floor(seconds * SAMPLE_RATE) * 2 - (w?.length ?? 0)
+    if (bytes < 0.05 * SAMPLE_RATE * 2) return 0
+    this.write(track, Buffer.alloc(bytes))
+    return bytes
+  }
+
+  /** After capture restarts or a recording carries on: line both tracks up again when their audio arrives. */
+  realign(): void {
+    this.pending = new Set(TRACKS)
   }
 
   /** Closes files and returns the tracks that captured any audio. */

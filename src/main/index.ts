@@ -17,7 +17,7 @@ import {
   Tray,
   type WebContents
 } from 'electron'
-import { existsSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { freemem } from 'node:os'
 import { basename, join, normalize, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -49,12 +49,12 @@ import { getLive, startLive, takeLive, type LiveTranscriber } from './live'
 import { exportFileName, exportOptions, syncToObsidian, vaultFiles } from './obsidian'
 import { cleanText, enqueue, type PipelineEvents } from './pipeline'
 import { Recording, repairWav, SAMPLE_RATE, type Track } from './recorder'
-import { saveRoster, teamsCallOpen, TeamsRoster } from './roster'
+import { addressFits, rosterDone, teamsCallOpen, TeamsRoster } from './roster'
 import { takeScreenshot } from './screenshot'
 import { copyToClipboard, emailDraft, saveMarkdown, savePdf } from './share'
 import { redact } from './redact'
 import { downloadSpeech, setupStatus, speakersReady, speechReady } from './setup'
-import { syncVoices } from './speakers'
+import { forgetMeetingVoices, syncVoices } from './speakers'
 import { whisperPrompt } from './speech'
 import * as store from './store'
 import { splitNote } from './summarizer'
@@ -69,7 +69,7 @@ if (process.env.KASHA_DATA_DIR) app.setPath('userData', process.env.KASHA_DATA_D
 crashReporter.start({ uploadToServer: false })
 
 /** Error text for the log, without file paths (they can hold meeting titles). */
-const scrub = (e: unknown) => String((e as Error)?.message ?? e).replace(/[A-Za-z]:[\\/][^'"\n]*/g, '<path>').slice(0, 200)
+const scrub = (e: unknown) => String((e as Error)?.message ?? e).replace(/(?<![A-Za-z])[A-Za-z]:[\\/].*$|\\\\.*$/s, '<path>').slice(0, 200)
 process.on('uncaughtException', (e) => log('error', { where: 'main', error: scrub(e) }))
 process.on('unhandledRejection', (e) => log('error', { where: 'promise', error: scrub(e) }))
 
@@ -77,7 +77,13 @@ process.on('unhandledRejection', (e) => log('error', { where: 'promise', error: 
 app.disableHardwareAcceleration()
 app.setAppUserModelId('com.sola.kasha')
 
-if (!app.requestSingleInstanceLock()) app.quit()
+// Kasha is already running (the first copy is shown instead; see second-instance).
+// Exit now: app.quit() let this copy's startup run anyway, which marked the
+// running recording failed and processed its meetings a second time.
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0)
+  process.exit(0)
+}
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'kasha-file', privileges: { standard: true, secure: true, supportFetchAPI: true } }
@@ -106,6 +112,10 @@ interface ActiveRecording extends RecordingInfo {
   restarts: number[]
   /** Reads who's in the Teams call, for naming speakers. */
   roster: TeamsRoster | null
+  /** When audio last arrived from the bar, to notice capture that stopped silently. */
+  lastAudio: number
+  /** The bar couldn't open the mic or the computer's audio: nothing to watch for. */
+  noCapture?: boolean
 }
 let recording: ActiveRecording | null = null
 
@@ -232,7 +242,8 @@ function alwaysRecords(title: string, match?: CalendarMatch | null): boolean {
   const r = ruleSettings()
   const titles = [title, match?.subject ?? ''].filter((t) => t && !GENERIC_TITLE.test(t))
   if (titles.some((t) => listHas(r.meetings, t))) return true
-  return r.people.some((p) => mentions(title, p) || !!match?.attendees.some((a) => mentions(a, p)))
+  // The calendar often lists people only by address, so an address that fits the name counts too.
+  return r.people.some((p) => mentions(title, p) || !!match?.attendees.some((a) => mentions(a, p) || addressFits(a, p)))
 }
 
 /** The title a recurring-meeting rule would use: the window title, or the calendar subject when that's generic. */
@@ -351,6 +362,7 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
   // The clock carries on from the first part, so note timestamps match the audio.
   const startedAt = resume && meeting.recordingStartedAt ? Date.parse(meeting.recordingStartedAt) : Date.now() - had * 1000
   if (resume) rec.padTo((Date.now() - startedAt) / 1000)
+  if (resume || leftover) rec.realign()
   meeting = store.updateMeeting(meeting.id, {
     status: 'recording',
     recordingStartedAt: new Date(startedAt).toISOString(),
@@ -378,9 +390,9 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
   // Live transcription starts again from the top of what's already recorded.
   for (const [track, bytes] of Object.entries(rec.lengths())) live?.wrote(track as Track, bytes)
   // A Teams call (detected, or recorded by hand while one is on): read who's in it.
-  const roster = settings.speakers.fromTeams && (meeting.app === 'teams' || detector.isLive('teams')) ? new TeamsRoster(startedAt) : null
+  const roster = settings.speakers.fromTeams && (meeting.app === 'teams' || detector.isLive('teams')) ? new TeamsRoster(startedAt, id) : null
   void roster?.start()
-  recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted, restarts: [], roster }
+  recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted, restarts: [], roster, lastAudio: Date.now() }
   log('recording-started', { app: meeting.app, how: resume ? 'resume' : opts.auto ? 'auto' : opts.accepted ? 'prompt' : 'manual', live: !!live, model: settings.speechModel, carriedOnMin: had ? Math.round(had / 60) : undefined })
   closeToast()
   if ((opts.auto || resume) && Notification.isSupported()) {
@@ -398,6 +410,7 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
   if (calendar) void calendar.then((match) => onCalendar(id, match))
   openBar()
   startMemoryLog()
+  watchAudio()
   refreshTray()
   broadcast('recording-changed', recordingInfo())
   broadcast('meetings-changed')
@@ -422,11 +435,20 @@ function restartCapture(reason: string): void {
   recording.restarts = recording.restarts.filter((t) => now - t < 10 * 60_000)
   if (recording.restarts.length >= 5) {
     log('capture-gave-up', { reason })
-    store.updateMeeting(recording.meetingId, { error: 'Audio capture kept stopping, so Kasha stopped recording. What was recorded is kept.' })
+    // Said out loud: a recording that just stops looks like it's still going.
+    if (Notification.isSupported()) {
+      const id = recording.meetingId
+      const n = new Notification({ title: 'Recording stopped', body: 'Audio capture kept stopping, so Kasha stopped recording. What was recorded is kept.', silent: false })
+      n.on('click', () => showMain({ meetingId: id }))
+      n.show()
+    }
     return finalizeRecording()
   }
   recording.restarts.push(now)
   const added = recording.rec.padTo((now - recording.startedAt) / 1000)
+  // The new bar's audio starts a moment later still: line it up when it arrives.
+  recording.rec.realign()
+  recording.noCapture = false
   for (const [track, bytes] of Object.entries(added)) recording.live?.wrote(track as Track, bytes)
   log('capture-restarted', { reason, gapSecs: Math.round(Math.max(0, ...Object.values(added)) / 2 / SAMPLE_RATE) })
   const old = barWin
@@ -457,6 +479,26 @@ function startMemoryLog(): void {
   memoryTimer = setInterval(sample, 5 * 60_000)
 }
 
+/**
+ * The bar sends audio (silence included) every half second while capture
+ * runs. None for 15 s means capture stopped without saying so.
+ */
+let audioWatch: NodeJS.Timeout | null = null
+function watchAudio(): void {
+  if (audioWatch) return
+  audioWatch = setInterval(() => {
+    if (!recording) {
+      if (audioWatch) clearInterval(audioWatch)
+      audioWatch = null
+      return
+    }
+    if (!recording.stopping && !recording.noCapture && Date.now() - recording.lastAudio > 15_000) {
+      recording.lastAudio = Date.now()
+      restartCapture('no-audio')
+    }
+  }, 5_000)
+}
+
 /** Asks the bar to flush its last audio, then finalizes. Falls back after 3s. */
 function stopRecording(): void {
   if (!recording || recording.stopping) return
@@ -467,6 +509,8 @@ function stopRecording(): void {
 }
 
 const pipelineEvents: PipelineEvents = {
+  inCall: () => !!recording,
+  settingsChanged: () => broadcast('settings-changed', store.getSettings()),
   changed: () => {
     broadcast('meetings-changed')
     broadcast('actions-changed')
@@ -487,12 +531,16 @@ function finalizeRecording(): void {
   // How far live transcription is behind: what's left to do after the call.
   const behind = live?.pending()
   const tracks = rec.close()
-  if (roster) saveRoster(meetingId, roster.stop())
+  if (roster) {
+    roster.stop()
+    rosterDone(meetingId)
+  }
   log('recording-stopped', { tracks: tracks.map((t) => t.track).join('+') || 'none', minutes: Math.round((Date.now() - startedAt) / 60_000), chunksLeft: behind })
   store.updateMeeting(meetingId, {
     recordingEndedAt: new Date().toISOString(),
     status: tracks.length ? 'transcribing' : 'ready',
-    error: tracks.length ? undefined : 'No audio was captured.'
+    // Keep a more specific reason (the mic or system audio couldn't be opened).
+    error: tracks.length ? undefined : (store.getMeeting(meetingId)?.error ?? 'No audio was captured.')
   })
   if (barWin && !barWin.isDestroyed()) barWin.destroy()
   barWin = null
@@ -648,7 +696,10 @@ function registerIpc(): void {
     if (patch.speakers && typeof patch.speakers === 'object') {
       const names: NonNullable<Meeting['speakers']> = {}
       for (const [k, v] of Object.entries(patch.speakers)) {
-        if (isSpeakerId(k) && typeof v === 'string' && v.trim()) names[k] = v.trim().slice(0, 60)
+        if (!isSpeakerId(k) || typeof v !== 'string' || !v.trim()) continue
+        // A name the user didn't touch stays exactly as it was: trimming a long
+        // guess would look like a rename, and a rename learns the voice.
+        names[k] = v === before?.speakers?.[k] ? v : v.trim().slice(0, 60)
       }
       clean.speakers = names
       // The summary still uses the old names until it's rewritten.
@@ -680,6 +731,8 @@ function registerIpc(): void {
       clean.speakerGuesses = rest
       // Now it's confirmed, the voice is learned like any name the user gave.
       syncVoices(id, { ...before.speakers, [confirm]: undefined }, before.speakers)
+      // The summary called them "Speaker N (possibly …)".
+      if (hasSummary(id)) clean.summaryOutdated = true
     }
     const m = store.updateMeeting(id, clean)
     if (recording?.meetingId === id && clean.title) {
@@ -695,7 +748,8 @@ function registerIpc(): void {
   })
   handle('meetings:saveImage', (id: string, data: ArrayBuffer, ext: string) => {
     const safeExt = /^(png|jpe?g|gif|webp)$/i.test(ext) ? ext.toLowerCase() : 'png'
-    const name = `image-${Date.now()}.${safeExt}`
+    // Not a bare 13-digit number: that can pass the card check and get redacted out of the note.
+    const name = `image-${Date.now().toString(36)}.${safeExt}`
     writeFileSync(join(store.paths.meeting(id), 'attachments', name), Buffer.from(data))
     return `attachments/${name}`
   })
@@ -758,6 +812,8 @@ function registerIpc(): void {
         }
       }
     }
+    // Voices learned from this meeting go with it (they're biometric-like data).
+    forgetMeetingVoices(id)
     store.deleteMeeting(id)
     broadcast('meetings-changed')
     if (opts?.remember) {
@@ -809,7 +865,9 @@ function registerIpc(): void {
 
   handle('settings:get', () => store.getSettings())
   handle('settings:set', (patch: Partial<Settings>) => {
+    const was = store.getSettings().speakers.recognize
     const s = store.setSettings(patch)
+    if (was && !s.speakers.recognize) forgetMeetingPrints()
     applyLoginItem()
     return s
   })
@@ -846,6 +904,12 @@ function registerIpc(): void {
 
   handle('voices:list', () => voices.list())
   handle('voices:remove', (name: string) => voices.remove(String(name)))
+  // Every learned voice, and every meeting's voiceprints.
+  handle('voices:forgetAll', () => {
+    voices.clear()
+    forgetMeetingPrints()
+    log('voices-forgotten')
+  })
   handle('setup:pickFolder', async () => {
     const opts: Electron.OpenDialogOptions = { properties: ['openDirectory', 'createDirectory'] }
     const r = mainWin ? await dialog.showOpenDialog(mainWin, opts) : await dialog.showOpenDialog(opts)
@@ -904,11 +968,19 @@ function registerIpc(): void {
     if (!recording || e.sender.id !== barWin?.webContents.id) return
     if (track !== 'mic' && track !== 'sys') return
     const buf = Buffer.from(pcm)
+    // A track's first audio is lined up with the recording's clock: capture
+    // starts a moment after it, and the computer's audio later than the mic
+    // (0.6-4.9 s measured), which put "Others" lines early against "You" and
+    // the Teams timeline.
+    const lead = recording.rec.lead(track, (Date.now() - recording.startedAt) / 1000 - buf.length / 2 / SAMPLE_RATE)
+    if (lead) recording.live?.wrote(track, lead)
     recording.rec.write(track, buf)
     recording.live?.wrote(track, buf.length)
+    recording.lastAudio = Date.now()
   })
   ipcMain.on('bar:captureStarted', (_e, tracks: { mic: boolean; sys: boolean }) => {
     if (recording && !tracks.mic && !tracks.sys) {
+      recording.noCapture = true
       store.updateMeeting(recording.meetingId, { error: 'Kasha could not access the microphone or system audio.' })
     }
   })
@@ -945,6 +1017,19 @@ function registerIpc(): void {
   ipcMain.on('bar:openMain', () => recording && showMain({ meetingId: recording.meetingId }))
 }
 
+/** Deletes every meeting's voiceprints (speakers.json). Learned voices (voices.json) stay unless the user forgets them. */
+function forgetMeetingPrints(): void {
+  let failed = 0
+  for (const m of store.listMeetings()) {
+    try {
+      rmSync(join(store.paths.meeting(m.id), 'speakers.json'), { force: true })
+    } catch {
+      failed++
+    }
+  }
+  if (failed) log('voiceprints-not-deleted', { meetings: failed })
+}
+
 function applyLoginItem(): void {
   // Only the installed app registers itself; dev builds would register electron.exe.
   if (!app.isPackaged) return
@@ -979,7 +1064,7 @@ app.on('before-quit', () => {
     // Close files cleanly so the audio can still be processed next time.
     const { meetingId, rec, roster } = recording
     rec.close()
-    if (roster) saveRoster(meetingId, roster.stop())
+    roster?.stop()
     takeLive(meetingId)?.stop()
     store.updateMeeting(meetingId, { status: 'failed', error: 'Kasha quit during recording. Select Retry to process the audio.', recordingEndedAt: new Date().toISOString() })
     recording = null
@@ -1028,6 +1113,10 @@ app.whenReady().then(() => {
   }
 
   registerIpc()
+  // Voices learned from notes deleted before deleting took them along, and
+  // voiceprints left behind with recognition off.
+  voices.prune(new Set(store.listMeetings().map((m) => m.id)))
+  if (!store.getSettings().speakers.recognize) forgetMeetingPrints()
   applyLoginItem()
   updater.start()
   startAudioSweeper(() => broadcast('meetings-changed'))
@@ -1043,6 +1132,12 @@ app.whenReady().then(() => {
   if (!process.env.KASHA_NO_DETECT) detector.start()
   reminders.start()
   powerMonitor.on('resume', () => reminders.check())
+  // A sleeping PC drops the call too: end the recording rather than pad hours of silence on waking.
+  powerMonitor.on('suspend', () => {
+    if (!recording) return
+    log('recording-stopped-for-sleep')
+    stopRecording()
+  })
   powerMonitor.on('unlock-screen', () => reminders.check())
 
   const hidden = process.argv.includes('--hidden')

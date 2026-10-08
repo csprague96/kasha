@@ -126,6 +126,15 @@ function Actions({ meeting, recording, progress, settings, hasTranscript }: Prop
 }
 
 function Notice({ meeting }: { meeting: Meeting }) {
+  if (meeting.status === 'ready' && meeting.summaryFailed && meeting.error)
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-foreground/5 px-3 py-2 text-[13px] text-muted">
+        <span>{meeting.error}</span>
+        <Button size="sm" onClick={() => void window.kasha.resummarize(meeting.id)} title="Writes Summary, Decisions and Actions. Your notes are kept.">
+          Update summary
+        </Button>
+      </div>
+    )
   if (meeting.status === 'ready' && meeting.summaryOutdated)
     return (
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-foreground/5 px-3 py-2 text-[13px] text-muted">

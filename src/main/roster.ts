@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { normName, type Meeting, type SpeakerId, type TranscriptSegment } from '@shared/types'
@@ -52,7 +52,9 @@ static class KashaTeams {
   class Person { public string Name; public int Muted = -1; public bool Self; public int Speaking = -1; }
 
   static readonly RegexOptions I = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
-  static readonly Regex TileWord = new Regex(@"^(video is (on|off)|camera is (on|off)|(mic(rophone)? (is )?)?(un)?muted|context menu is available|has context menu)$", I);
+  static readonly Regex TileWord = new Regex(@"^(video is (on|off)|(video|camera) (is )?(on|off)|(mic(rophone)? (is )?)?(un)?muted|mic(rophone)? (is )?(on|off)|context menu is available|has context menu)$", I);
+  // Teams adds these to names; they're labels, not part of the name.
+  static readonly Regex Suffix = new Regex(@"\s*\((external|guest|unverified|organizer|presenter|attendee)\)", I);
   static readonly Regex MutedWord = new Regex(@"^(mic(rophone)? (is )?)?muted$|^mic(rophone)? (is )?off$", I);
   static readonly Regex UnmutedWord = new Regex(@"^(mic(rophone)? (is )?)?unmuted$|^mic(rophone)? (is )?on$", I);
   static readonly Regex SpeakingWord = new Regex(@"^(is )?(speaking|talking)$", I);
@@ -70,6 +72,7 @@ static class KashaTeams {
       who = parts[1];
     }
     if (Regex.IsMatch(who, @"\((you|me)\)\s*$", I)) { self = true; who = Regex.Replace(who, @"\s*\((you|me)\)\s*$", "", I); }
+    who = Suffix.Replace(who, "").Trim();
     if (who.Length == 0 || who.Length > 80 || !who.Any(char.IsLetter) || NotPerson.IsMatch(who)) return null;
     var p0 = new Person { Name = who, Self = self };
     foreach (var p in parts) {
@@ -242,13 +245,20 @@ export async function teamsCallOpen(): Promise<boolean | null> {
   })
 }
 
-/** Watches the Teams window for the length of one recording. */
+/**
+ * Watches the Teams window for the length of one recording. Each change is
+ * appended to the meeting's roster.jsonl as it's seen, so a crash doesn't lose
+ * who was there (Teams only reports changes, so the file stays small).
+ */
 export class TeamsRoster {
   private child: ChildProcess | null = null
   private timeline: RosterSnapshot[] = []
   private stopped = false
 
-  constructor(private readonly startedAt: number) {}
+  constructor(
+    private readonly startedAt: number,
+    private readonly meetingId: string
+  ) {}
 
   async start(): Promise<void> {
     const exe = await helper()
@@ -266,7 +276,13 @@ export class TeamsRoster {
           return
         }
         if (!Array.isArray(msg.people)) return
-        this.timeline.push({ t: (Date.now() - this.startedAt) / 1000, people: msg.people })
+        const snap = { t: (Date.now() - this.startedAt) / 1000, people: msg.people }
+        this.timeline.push(snap)
+        try {
+          appendFileSync(rosterLog(this.meetingId), `${JSON.stringify(snap)}\n`)
+        } catch {
+          /* the timeline in memory still has it */
+        }
       } catch {
         /* a partial line */
       }
@@ -285,28 +301,51 @@ export class TeamsRoster {
   }
 }
 
+/** roster.json: the timeline from 0.2.1 and 0.2.2. roster.jsonl: one snapshot per line, written as seen. */
 const rosterFile = (meetingId: string) => join(store.paths.meeting(meetingId), 'roster.json')
+const rosterLog = (meetingId: string) => join(store.paths.meeting(meetingId), 'roster.jsonl')
 
 export function readRoster(meetingId: string): RosterSnapshot[] {
+  const out: RosterSnapshot[] = []
   try {
     const t = JSON.parse(readFileSync(rosterFile(meetingId), 'utf8')) as RosterSnapshot[]
-    return Array.isArray(t) ? t : []
+    if (Array.isArray(t)) out.push(...t)
   } catch {
-    return []
+    /* none */
   }
+  try {
+    for (const line of readFileSync(rosterLog(meetingId), 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      try {
+        const s = JSON.parse(line) as RosterSnapshot
+        if (typeof s.t === 'number' && Array.isArray(s.people)) out.push(s)
+      } catch {
+        /* a line cut off by a crash */
+      }
+    }
+  } catch {
+    /* none */
+  }
+  return out.sort((a, b) => a.t - b.t)
 }
 
-/** Adds to the meeting's timeline (a recording carried on after a crash has two parts). */
-export function saveRoster(meetingId: string, timeline: RosterSnapshot[]): void {
-  if (!timeline.length) return
-  const all = [...readRoster(meetingId), ...timeline].sort((a, b) => a.t - b.t)
-  writeFileSync(rosterFile(meetingId), JSON.stringify(all))
+/** Logs what the reader saw when a recording ends (counts only). The snapshots are already on disk. */
+export function rosterDone(meetingId: string): void {
+  const all = readRoster(meetingId)
+  if (!all.length) return
   const people = new Set(all.flatMap((s) => s.people.map((p) => normName(p.name))))
-  log('teams-names', { snapshots: all.length, people: people.size })
+  const muted = all.some((s) => s.people.some((p) => !p.self && p.muted !== null))
+  log('teams-names', { snapshots: all.length, people: people.size, remoteMuteSeen: muted })
+}
+
+/** The note taker's own name as Teams shows it (the self tile), if seen. */
+export function selfName(timeline: RosterSnapshot[]): string | null {
+  for (const s of timeline) for (const p of s.people) if (p.self && p.name.trim()) return p.name.trim()
+  return null
 }
 
 /** The ways a company tends to build an address from a name: slee, sam.lee, samlee, sam_lee, sam, lees. */
-function addressForms(name: string): string[] {
+export function addressForms(name: string, fullOnly = false): string[] {
   const words = normName(name)
     .replace(/[^\p{L}\s'-]/gu, ' ')
     .split(/\s+/)
@@ -315,21 +354,38 @@ function addressForms(name: string): string[] {
   if (words.length < 2) return words
   const first = words[0]
   const last = words[words.length - 1]
-  return [first[0] + last, `${first}.${last}`, first + last, `${first}_${last}`, `${first}-${last}`, last + first[0], `${last}.${first}`]
+  const full = [`${first}.${last}`, first + last, `${first}_${last}`, `${first}-${last}`, `${last}.${first}`]
+  return fullOnly ? full : [first[0] + last, ...full, last + first[0]]
 }
 
 /**
  * Swaps invite entries that are only an address (the calendar lookup often
  * gives addresses, not names) for the name Teams showed for that person. An
- * address is matched only when exactly one person in the call fits it.
+ * address is matched only when exactly one person in the call fits it. With
+ * `self`, the note taker's own address becomes their name (`self.as`), so the
+ * Attendees tab ties it to "You" instead of listing it as not heard.
  */
-export function resolveAttendees(attendees: string[], people: string[]): string[] {
+/**
+ * An invite entry that's only an address and spells this person's whole name
+ * ("sam.lee@…" for Sam Lee). Initial forms ("slee@") are left out: for a rule
+ * that records without asking, Sara Lee's address mustn't count as Sam's.
+ */
+export function addressFits(entry: string, name: string): boolean {
+  const m = /^([^@\s]+)@/.exec(entry.trim())
+  return !!m && addressForms(name, true).includes(m[1].toLowerCase())
+}
+
+export function resolveAttendees(attendees: string[], people: string[], self?: { name: string; as: string }): string[] {
   const out = attendees.map((a) => {
     const m = /^([^@\s]+)@/.exec(a)
     if (!m) return a
     const local = m[1].toLowerCase()
+    // Someone in the call first; the note taker only when nobody else fits,
+    // so "slee@" for Sara Lee isn't taken as the note taker Sam Lee.
     const hits = people.filter((p) => addressForms(p).includes(local))
-    return hits.length === 1 ? hits[0] : a
+    if (hits.length === 1) return hits[0]
+    if (!hits.length && self && addressForms(self.name).includes(local)) return self.as
+    return a
   })
   return Array.from(new Set(out))
 }
@@ -370,27 +426,36 @@ function samples(segs: TranscriptSegment[]): number[] {
 }
 
 export interface RosterNames {
-  /** Certain: the call had one other person. */
-  names: NonNullable<Meeting['speakers']>
-  /** Likely, for the user to confirm. */
+  /** Likely names, for the user to confirm with one click, by speaker id. */
   guesses: NonNullable<Meeting['speakerGuesses']>
   guessNames: NonNullable<Meeting['speakers']>
 }
 
 /**
- * Names the voices on the computer's audio from the Teams timeline. Speakers
- * that already have a name (given by the user, or a known voice) are left alone.
+ * Names the voices on the computer's audio from the Teams timeline, as
+ * guesses to confirm: a tile name can be a room system with several people
+ * in it, or miss a phone dial-in, so it's never taken as certain, and a voice
+ * is only learned once the user says yes. Speakers that already have a name
+ * are left alone.
  */
 export function namesFromRoster(timeline: RosterSnapshot[], transcript: TranscriptSegment[], known: Meeting['speakers'], myName = ''): RosterNames {
-  const out: RosterNames = { names: {}, guesses: {}, guessNames: {} }
+  const out: RosterNames = { guesses: {}, guessNames: {} }
   const remote = participants(timeline, myName)
   const ids = [...new Set(transcript.map((s) => s.speaker))].filter((id): id is SpeakerId => id !== 'you' && !known?.[id]?.trim())
   if (!remote.length || !ids.length) return out
   const taken = new Set(Object.values(known ?? {}).map((n) => normName(n ?? '')))
 
-  // One other person in the whole call: every other voice is theirs.
+  // One other person in the whole call: the other voices are probably theirs.
   if (remote.length === 1) {
-    if (!taken.has(normName(remote[0]))) for (const id of ids) out.names[id] = remote[0]
+    if (taken.has(normName(remote[0]))) return out
+    const evidence =
+      ids.length === 1
+        ? `${remote[0]} was the only other person in the Teams call.`
+        : `${remote[0]} was the only other person Teams showed, but Kasha heard ${ids.length} voices: one may be a phone or room system.`
+    for (const id of ids) {
+      out.guessNames[id] = remote[0]
+      out.guesses[id] = { evidence }
+    }
     return out
   }
 
@@ -405,7 +470,10 @@ export function namesFromRoster(timeline: RosterSnapshot[], transcript: Transcri
       for (const name of remote) {
         const k = normName(name)
         const states = near.map((s) => s.people.find((p) => normName(p.name) === k)).filter((p): p is RosterPerson => !!p)
-        if (states.some((p) => p.muted !== true)) fit.set(k, (fit.get(k) ?? 0) + 1)
+        // Someone Teams didn't show at that moment (off the gallery, or the
+        // window wasn't found) might have been talking: counting them keeps a
+        // visible person from being picked by elimination when it wasn't them.
+        if (!states.length || states.some((p) => p.muted !== true)) fit.set(k, (fit.get(k) ?? 0) + 1)
         if (states.some((p) => p.speaking === true)) spoke.set(k, (spoke.get(k) ?? 0) + 1)
       }
     }

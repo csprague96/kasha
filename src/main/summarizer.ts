@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { speakerName, type Meeting, type Settings, type SpeakerId, type TranscriptSegment } from '@shared/types'
+import { redact, redactLines } from './redact'
 import { claudeExe, codexExe } from './setup'
 
 export interface Summary {
@@ -62,6 +63,8 @@ Rules:
 - If the note taker's name is given, anything assigned to that name is owned by "Me".
 - speakers: for a label like "Speaker 2" (never "You" or "Others"), the person's name, but only when the conversation shows it. For example: someone asks "Did you check that last week, Andy?" and Speaker 2 is the one who answers; a speaker introduces themselves; or someone thanks or replies to a speaker by name. Prefer a name from "Invited", spelled as it is there. evidence: the cue in a few words with its time, like "[12:03] asked 'Did you check that, Andy?' and Speaker 2 answered". Leave a speaker out when the cues are weak or point different ways. Two labels may get the same name only if they're clearly the same person. Use names given here in the summary and actions too.
 - "Invited" lists who the calendar invite went to; not all of them may have joined. Use it to spell names right, and to name a "Speaker" only when the conversation makes clear who it is.
+- A label like "Speaker 2 (possibly Name)" is an unconfirmed guess. Refer to that person as "Speaker 2" in the summary, decisions and actions, never by the guessed name as fact, and leave them out of speakers.
+- "In the call", when given, lists who the meeting app showed in the call. Prefer it to "Invited" for spelling names.
 - tags: 1 to 3 short lowercase topic tags, no "#", hyphens instead of spaces.
 - title: a short specific title (under 60 characters) only if the current title is generic like "Teams meeting" or "New note"; otherwise null.
 - The note taker's own notes are the most important signal for what mattered. Don't repeat checkboxes from their notes as actions.
@@ -82,11 +85,22 @@ export interface SummaryContext {
   attendees?: string[]
   /** Seen in the call itself (the Teams window), besides the note taker. */
   participants?: string[]
+  /** Speakers whose name is a guess the user hasn't confirmed. */
+  guessed?: SpeakerId[]
 }
 
-function buildPrompt(ctx: SummaryContext, notes: string, transcript: TranscriptSegment[]): string {
+function buildPrompt(ctx: SummaryContext, rawNotes: string, rawTranscript: TranscriptSegment[]): string {
+  // Nothing PCI-sensitive is sent, even from notes written before redaction covered them.
+  const notes = redact(rawNotes)
+  const transcript = redactLines(rawTranscript)
   // The note taker stays "You" even when named, so the rules above still apply.
-  const label = (t: TranscriptSegment) => (t.speaker === 'you' ? 'You' : speakerName(t.speaker, ctx.speakers))
+  // A guessed name is labelled as one, so the summary doesn't state it as fact.
+  const label = (t: TranscriptSegment) =>
+    t.speaker === 'you'
+      ? 'You'
+      : ctx.guessed?.includes(t.speaker) && ctx.speakers?.[t.speaker]
+        ? `${speakerName(t.speaker)} (possibly ${ctx.speakers[t.speaker]})`
+        : speakerName(t.speaker, ctx.speakers)
   const lines = transcript.map((t) => `[${clock(t.start)}] ${label(t)}: ${t.text}`)
   const d = ctx.meetingDate
   const date = `${d.toLocaleDateString('en-GB', { weekday: 'long' })} ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
@@ -124,7 +138,9 @@ export function emptyDir(name: string): string {
 
 /** Quotes args for cmd.exe when an npm .cmd shim has to be run through the shell. */
 function shellQuote(args: string[]): string[] {
-  return args.map((a) => (a === '' ? '""' : `"${a.replace(/"/g, '\\"')}"`))
+  // cmd.exe ends the command at a line break, which cut multi-line system
+  // prompts (and their rules) down to the first line: line breaks become spaces.
+  return args.map((a) => (a === '' ? '""' : `"${a.replace(/\r?\n/g, ' ').replace(/"/g, '\\"')}"`))
 }
 
 export function run(exe: string, args: string[], input: string, cwd: string, timeout = 5 * 60_000): Promise<{ stdout: string; stderr: string }> {

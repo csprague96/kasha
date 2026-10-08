@@ -107,8 +107,10 @@ export function attendance(m: Meeting, transcript: TranscriptSegment[], myName: 
 /** Names for exports: who was there and who was invited but not heard. The note taker is left out unless named. */
 export function attendanceSummary(rows: AttendeeRow[]): { present: string[]; absent: string[] } {
   const named = rows.filter((r) => r.name !== 'You' && !/^(Others|Speaker \d+)$/.test(r.name))
+  // A guessed name the user hasn't confirmed keeps its question mark.
+  const label = (r: AttendeeRow) => (r.guessed ? `${r.name}?` : r.name)
   return {
-    present: named.filter((r) => r.present).map((r) => r.name),
+    present: named.filter((r) => r.present).map(label),
     absent: named.filter((r) => !r.present).map((r) => r.name)
   }
 }

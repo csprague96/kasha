@@ -1,12 +1,12 @@
 import { Check, Pencil, Replace, X } from 'lucide-react'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { countMatches, findPattern } from '@shared/text'
 import { speakerName, type Meeting, type SpeakerId, type TranscriptSegment } from '@shared/types'
 import { clock, cn } from '@/lib/utils'
 import { CorrectWord, wordAtPoint, type WordAt } from './CorrectWord'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
-import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from './ui/popover'
 
 interface Props {
   meeting: Meeting
@@ -39,60 +39,141 @@ function highlight(text: string, re: RegExp | null): ReactNode {
 
 // ---------- Speakers ----------
 
+/**
+ * Names to offer for a speaker, one click each: people Teams showed in the
+ * call, then invitees (some only as an address), leaving out names other
+ * speakers already have.
+ */
+function nameChoices(id: SpeakerId, meeting: Meeting, typed: string): Array<{ name: string; from: string }> {
+  const key = (n: string) => n.trim().toLowerCase()
+  const used = new Set(
+    Object.entries(meeting.speakers ?? {})
+      .filter(([k, v]) => k !== id && v && !meeting.speakerGuesses?.[k as SpeakerId])
+      .map(([, v]) => key(v!))
+  )
+  const out: Array<{ name: string; from: string }> = []
+  const seen = new Set<string>()
+  const add = (name: string, from: string) => {
+    const k = key(name)
+    if (!k || used.has(k) || seen.has(k)) return
+    seen.add(k)
+    out.push({ name, from })
+  }
+  for (const p of meeting.participants ?? []) add(p, 'In the call')
+  for (const a of meeting.attendees ?? []) add(a, 'Invited')
+  const t = key(typed)
+  return (t ? out.filter((c) => key(c.name).includes(t)) : out).slice(0, 12)
+}
+
 function SpeakerChip({ id, meeting }: { id: SpeakerId; meeting: Meeting }) {
   const [editing, setEditing] = useState(false)
   const name = speakerName(id, meeting.speakers)
-  const [value, setValue] = useState(name)
-  useEffect(() => setValue(name), [name])
+  const given = meeting.speakers?.[id]?.trim() ?? ''
+  const [value, setValue] = useState(given)
+  const [active, setActive] = useState(-1) // highlighted choice, for the keyboard
+  const listId = useId()
+  // One save per edit: Enter or a click closes the box, and a blur after that mustn't save again.
+  const saved = useRef(false)
+  useEffect(() => setValue(given), [given])
+  useEffect(() => {
+    if (editing) saved.current = false
+  }, [editing])
 
-  const commit = () => {
+  /**
+   * Saves a name. A guess is only confirmed (and its voice learned) by an
+   * explicit choice: picking the guessed name in the list, or the ✓ button.
+   * Leaving the box, or Enter, with the name unchanged is just a cancel.
+   */
+  const save = (v: string, picked = false) => {
+    if (saved.current) return
+    saved.current = true
     setEditing(false)
-    const v = value.trim()
+    setActive(-1)
+    if (meeting.speakerGuesses?.[id] && v && v === given) {
+      if (picked) void window.kasha.updateMeeting(meeting.id, { confirmSpeaker: id })
+      return
+    }
     const next = { ...meeting.speakers }
     // Clearing the name, or typing the default, goes back to "Speaker 2".
     if (v && v !== speakerName(id)) next[id] = v
     else delete next[id]
     if ((next[id] ?? '') !== (meeting.speakers?.[id] ?? '')) void window.kasha.updateMeeting(meeting.id, { speakers: next })
   }
+  const commit = () => save(value.trim())
 
   if (editing) {
-    // People invited to the meeting who haven't been given to a speaker yet.
-    const listId = `invited-${id}`
-    const named = new Set(Object.values(meeting.speakers ?? {}))
-    const invited = (meeting.attendees ?? []).filter((a) => !named.has(a))
+    const choices = nameChoices(id, meeting, value === given ? '' : value)
+    const optionId = (i: number) => `${listId}-${i}`
     return (
-      <>
-        {invited.length > 0 && (
-          <datalist id={listId}>
-            {invited.map((a) => (
-              <option key={a} value={a} />
-            ))}
-          </datalist>
+      <Popover open>
+        <PopoverAnchor asChild>
+          <input
+            autoFocus
+            role="combobox"
+            aria-expanded={choices.length > 0}
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={active >= 0 && active < choices.length ? optionId(active) : undefined}
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value)
+              setActive(-1)
+            }}
+            onFocus={(e) => e.currentTarget.select()}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown' && choices.length) {
+                e.preventDefault()
+                setActive((i) => (i + 1) % choices.length)
+              } else if (e.key === 'ArrowUp' && choices.length) {
+                e.preventDefault()
+                setActive((i) => (i <= 0 ? choices.length - 1 : i - 1))
+              } else if (e.key === 'Enter') {
+                e.preventDefault()
+                if (active >= 0 && active < choices.length) save(choices[active].name, true)
+                else commit()
+              } else if (e.key === 'Escape') {
+                setValue(given)
+                setActive(-1)
+                setEditing(false)
+              }
+            }}
+            aria-label={`Name for ${name}`}
+            placeholder={`Name for ${speakerName(id)}`}
+            className="h-7 w-48 rounded-md border border-primary bg-surface px-2 text-[13px] focus-visible:outline-offset-0"
+          />
+        </PopoverAnchor>
+        {choices.length > 0 && (
+          <PopoverContent align="start" className="w-64 p-1" onOpenAutoFocus={(e) => e.preventDefault()}>
+            <ul id={listId} role="listbox" aria-label="Choose a name">
+              {choices.map((c, i) => (
+                <li
+                  key={c.name}
+                  id={optionId(i)}
+                  role="option"
+                  aria-selected={i === active}
+                  // Keeps the typing box from saving first, on blur.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => save(c.name, true)}
+                  onMouseEnter={() => setActive(i)}
+                  className={cn(
+                    'flex w-full cursor-default items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[13px]',
+                    i === active && 'bg-sidebar'
+                  )}
+                >
+                  <span className="truncate">{c.name}</span>
+                  <span className="shrink-0 text-xs text-muted">{c.from}</span>
+                </li>
+              ))}
+            </ul>
+          </PopoverContent>
         )}
-        <input
-          autoFocus
-          list={invited.length ? listId : undefined}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onFocus={(e) => e.currentTarget.select()}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') e.currentTarget.blur()
-            if (e.key === 'Escape') {
-              setValue(name)
-              setEditing(false)
-            }
-          }}
-          aria-label={`Name for ${name}`}
-          placeholder={speakerName(id)}
-          className="h-7 w-40 rounded-md border border-primary bg-surface px-2 text-[13px] focus-visible:outline-offset-0"
-        />
-      </>
+      </Popover>
     )
   }
   const guess = meeting.speakerGuesses?.[id]
   if (guess) {
-    // Named from the conversation: shown as a question until the user says yes or no.
+    // A guess (from Teams, a known voice or the conversation): a question until the user says yes or no.
     const clear = () => {
       const next = { ...meeting.speakers }
       delete next[id]
@@ -102,7 +183,7 @@ function SpeakerChip({ id, meeting }: { id: SpeakerId; meeting: Meeting }) {
       <span className="inline-flex h-7 items-center rounded-md border border-dashed border-border bg-surface text-[13px]">
         <button
           onClick={() => setEditing(true)}
-          title={`Guessed from the conversation${guess.evidence ? `: ${guess.evidence}` : ''}. Select to rename.`}
+          title={`${guess.evidence || 'A guess.'} Select to pick someone else.`}
           className="inline-flex h-full items-center gap-1 rounded-l-md px-2 hover:bg-sidebar"
         >
           {name}
@@ -269,8 +350,8 @@ function LineText({
  * the fix can be offered for future meetings. Null when more changed.
  */
 export function wordChange(before: string, after: string): { from: string; to: string } | null {
-  const a = before.split(/s+/).filter(Boolean)
-  const b = after.split(/s+/).filter(Boolean)
+  const a = before.split(/\s+/).filter(Boolean)
+  const b = after.split(/\s+/).filter(Boolean)
   let i = 0
   while (i < a.length && i < b.length && a[i] === b[i]) i++
   let j = 0
@@ -278,7 +359,7 @@ export function wordChange(before: string, after: string): { from: string; to: s
   const from = a.slice(i, a.length - j)
   const to = b.slice(i, b.length - j)
   if (!from.length || !to.length || from.length > 3 || to.length > 3) return null
-  const strip = (w: string[]) => w.join(' ').replace(/^[^p{L}p{N}]+|[^p{L}p{N}]+$/gu, '')
+  const strip = (w: string[]) => w.join(' ').replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')
   const f = strip(from)
   const t = strip(to)
   if (!f || !t || f.toLowerCase() === t.toLowerCase()) return null

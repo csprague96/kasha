@@ -1,16 +1,16 @@
 import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { applyVocabulary } from '@shared/text'
-import { GENERIC_TITLE, type Meeting } from '@shared/types'
+import { GENERIC_TITLE, type Meeting, type SpeakerId, type TranscriptSegment } from '@shared/types'
 import { takeLive } from './live'
 import { log } from './log'
 import { exportOptions, syncToObsidian } from './obsidian'
 import type { Track } from './recorder'
 import { redact } from './redact'
 import { speakersReady } from './setup'
-import { namesFromRoster, participants, readRoster, resolveAttendees } from './roster'
-import { separateSpeakers, syncVoices } from './speakers'
-import { whisperPrompt } from './speech'
+import { namesFromRoster, participants, readRoster, resolveAttendees, selfName } from './roster'
+import { separateSpeakers, type SeparateResult } from './speakers'
+import { BATCH_THREADS, LIVE_THREADS, whisperPrompt } from './speech'
 import * as store from './store'
 import { carryChecks, speakerGuesses, splitNote, summarize, summaryMarkdown } from './summarizer'
 import { finalize, transcribe } from './transcriber'
@@ -18,15 +18,30 @@ import { finalize, transcribe } from './transcriber'
 
 export interface PipelineEvents {
   changed(id: string): void
+  /** Settings changed here (the note taker's name, learned from Teams). */
+  settingsChanged(): void
+  /** A call is being recorded: processing uses few threads so the call and its live transcript come first. */
+  inCall(): boolean
   progress(id: string, p: number | null): void
   done(m: Meeting): void
 }
 
 let queue: Promise<void> = Promise.resolve()
+const queued = new Set<string>()
 
-/** Processing runs one meeting at a time so back-to-back calls don't stack CPU load. */
+/**
+ * Processing runs one meeting at a time so back-to-back calls don't stack CPU
+ * load. A meeting already waiting isn't queued again (Retry pressed twice).
+ */
 export function enqueue(id: string, events: PipelineEvents): void {
-  queue = queue.then(() => run(id, events)).catch(() => undefined)
+  if (queued.has(id)) return
+  queued.add(id)
+  queue = queue
+    .then(() => {
+      queued.delete(id)
+      return run(id, events)
+    })
+    .catch(() => undefined)
 }
 
 /** Fixes names and terms from Settings, then removes card numbers and SSNs (PCI). */
@@ -41,6 +56,101 @@ function audioTracks(id: string): Array<{ track: Track; file: string }> {
     .filter((t) => existsSync(t.file))
 }
 
+type Setter = (patch: Partial<Meeting>) => Meeting
+
+/**
+ * Works out who's who: who Teams showed in the call, the voices on the
+ * computer's audio told apart, and names for them. Every name found here is a
+ * guess ("Name?") the user confirms with one click; a voice is only learned
+ * once they do. The order is: names the user gave, then Teams, then voices
+ * that sound like someone named before (only people in the call or invited).
+ */
+async function identify(
+  id: string,
+  transcript: TranscriptSegment[],
+  tracks: Array<{ track: Track; file: string }>,
+  set: Setter,
+  secs: () => number,
+  onSettings: () => void,
+  inCall: () => boolean
+): Promise<TranscriptSegment[]> {
+  let m = store.getMeeting(id)!
+  const timeline = readRoster(id)
+
+  // Who the Teams window showed (roster.ts).
+  if (timeline.length && !m.participants?.length) {
+    const self = selfName(timeline)
+    // How the note taker is named, if they haven't said: Teams knows. Only a
+    // full name, so a misread tile can't make a single word "you".
+    if (self && self.trim().split(/ +/).length >= 2 && !store.getSettings().myName.trim()) {
+      store.setSettings({ myName: self })
+      onSettings()
+      log('my-name-from-teams')
+    }
+    const myName = store.getSettings().myName
+    const people = participants(timeline, myName)
+    if (people.length) {
+      // Invitees the calendar gave only as addresses get the names Teams showed.
+      const invited = m.attendees ?? []
+      const me = self ? { name: self, as: myName.trim() || self } : undefined
+      m = set({ participants: people, ...(invited.length ? { attendees: resolveAttendees(invited, people, me) } : {}) })
+    }
+  }
+  const people = m.participants ?? []
+
+  // Tell the people on the computer's audio apart, unless that's done already.
+  const sys = tracks.find((t) => t.track === 'sys')
+  const split = transcript.some((s) => /^s\d+$/.test(s.speaker))
+  let matches: SeparateResult['matches'] = {}
+  if (sys && !split && !m.speakers?.others && store.getSettings().speakers.separate && speakersReady() && transcript.some((s) => s.speaker === 'others')) {
+    set({ status: 'separating' })
+    try {
+      // The invite (less the note taker) says how many voices to look for;
+      // Teams says how many people there were at most. Everyone invited or
+      // seen is who a known voice may be.
+      const invited = m.attendees ?? []
+      const r = await separateSpeakers(id, sys.file, transcript, {
+        expected: invited.length >= 2 ? Math.min(invited.length - 1, 8) : undefined,
+        max: people.length || undefined,
+        // During the next call, separation stays out of its way.
+        threads: inCall() ? Math.max(1, Math.floor(LIVE_THREADS / 2)) : undefined,
+        candidates: people.length || invited.length ? [...people, ...invited] : undefined
+      })
+      transcript = r.transcript
+      matches = r.matches
+      transcript = store.writeTranscript(id, transcript)
+      const talk = new Map<string, number>()
+      for (const s of transcript) if (s.speaker !== 'you') talk.set(s.speaker, (talk.get(s.speaker) ?? 0) + s.end - s.start)
+      log('speakers', {
+        found: talk.size,
+        substantial: [...talk.values()].filter((t) => t >= 20).length,
+        inCall: people.length || undefined,
+        capped: r.capped.length || undefined,
+        matched: Object.keys(matches).length,
+        secs: secs()
+      })
+    } catch (e) {
+      // Not worth failing the meeting over: everyone stays "Others".
+      console.error('speakers:', (e as Error).message)
+      log('speakers-failed', { error: (e as Error).message.slice(0, 200) })
+    }
+  }
+
+  // Names to confirm, from Teams first, then from known voices.
+  m = store.getMeeting(id)!
+  const fromTeams = timeline.length ? namesFromRoster(timeline, transcript, m.speakers, store.getSettings().myName) : { guesses: {}, guessNames: {} }
+  const guessNames: NonNullable<Meeting['speakers']> = { ...fromTeams.guessNames }
+  const guesses: NonNullable<Meeting['speakerGuesses']> = { ...fromTeams.guesses }
+  for (const [sid, hit] of Object.entries(matches) as Array<[SpeakerId, { name: string; score: number }]>) {
+    if (m.speakers?.[sid]?.trim() || guessNames[sid]) continue
+    guessNames[sid] = hit.name
+    guesses[sid] = { evidence: `Sounds like ${hit.name} from an earlier meeting (voice match ${hit.score.toFixed(2)}).` }
+  }
+  log('named', { fromTeams: Object.keys(fromTeams.guesses).length, fromVoices: Object.keys(guesses).length - Object.keys(fromTeams.guesses).length })
+  set({ speakers: { ...guessNames, ...m.speakers }, speakerGuesses: { ...m.speakerGuesses, ...guesses }, separated: true })
+  return transcript
+}
+
 async function run(id: string, ev: PipelineEvents): Promise<void> {
   const t0 = Date.now()
   const secs = () => Math.round((Date.now() - t0) / 1000)
@@ -50,108 +160,99 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
     return m
   }
   const live = takeLive(id)
+  const wasStatus = store.getMeeting(id)?.status
   try {
     let transcript = store.readTranscript(id)
     const tracks = audioTracks(id)
+    const fresh = transcript.length === 0 && tracks.length > 0
 
-    if (transcript.length === 0 && tracks.length > 0) {
+    if (fresh) {
       set({ status: 'transcribing', error: undefined })
       ev.progress(id, 0)
       const progress = (p: number) => ev.progress(id, p)
       // Live transcription usually has everything but the last few seconds done.
       // If it failed, the recorded files are transcribed from the start.
-      const fromLive = live ? await live.finish(progress) : null
+      const threads = ev.inCall() ? LIVE_THREADS : BATCH_THREADS
+      const fromLive = live ? await live.finish(progress, threads) : null
       const segs = fromLive
         ? finalize(tracks, fromLive)
-        : await transcribe(tracks, whisperPrompt(store.getSettings()), progress)
+        : await transcribe(tracks, whisperPrompt(store.getSettings()), progress, threads)
       transcript = segs.map((s) => ({ ...s, text: cleanText(s.text) }))
-      store.writeTranscript(id, transcript)
+      transcript = store.writeTranscript(id, transcript)
       ev.progress(id, null)
       log('transcribed', { lines: transcript.length, fromLive: !!fromLive, secs: secs() })
-
-      // Tell the people on the computer's audio apart, and name voices known from past meetings.
-      // Who the Teams window showed in the call, if it was read (see roster.ts).
-      const timeline = readRoster(id)
-      const people = participants(timeline, store.getSettings().myName)
-      if (people.length) {
-        // Invitees the calendar gave only as addresses get the names Teams showed.
-        const invited = store.getMeeting(id)?.attendees ?? []
-        set({ participants: people, ...(invited.length ? { attendees: resolveAttendees(invited, people) } : {}) })
-      }
-      const sys = tracks.find((t) => t.track === 'sys')
-      if (sys && store.getSettings().speakers.separate && speakersReady() && transcript.some((s) => s.speaker === 'others')) {
-        set({ status: 'separating' })
-        try {
-          // How many voices to expect: the people seen in the call, else the invite list less the note taker.
-          const invited = store.getMeeting(id)?.attendees ?? []
-          const expected = people.length ? Math.min(people.length, 8) : invited.length >= 2 ? Math.min(invited.length - 1, 8) : undefined
-          // Teams' head count is also a ceiling: no more voices than people in the call.
-          const r = await separateSpeakers(id, sys.file, transcript, expected, people.length || undefined)
-          transcript = r.transcript
-          log('speakers', { found: new Set(transcript.filter((s) => s.speaker !== 'you').map((s) => s.speaker)).size, recognised: Object.keys(r.names).length, secs: secs() })
-          store.writeTranscript(id, transcript)
-          const m = store.getMeeting(id)!
-          set({ speakers: { ...r.names, ...m.speakers } })
-        } catch (e) {
-          // Not worth failing the meeting over: everyone stays "Others".
-          console.error('speakers:', (e as Error).message)
-          log('speakers-failed', { error: (e as Error).message.slice(0, 200) })
-        }
-      }
-
-      // Name the voices from the Teams timeline: outright for a one-to-one
-      // call, as guesses to confirm otherwise. Names already given win.
-      if (timeline.length) {
-        const m = store.getMeeting(id)!
-        const r = namesFromRoster(timeline, transcript, m.speakers, store.getSettings().myName)
-        log('teams-named', { people: people.length, named: Object.keys(r.names).length, guessed: Object.keys(r.guesses).length })
-        const speakers = { ...r.guessNames, ...r.names, ...m.speakers }
-        set({ speakers, speakerGuesses: { ...m.speakerGuesses, ...r.guesses } })
-        // Certain names teach Kasha the voice, like a name the user gave. Guesses wait for a yes.
-        if (Object.keys(r.names).length) syncVoices(id, m.speakers, { ...m.speakers, ...r.names })
-      }
     } else {
       live?.stop()
     }
 
-    let meeting = store.getMeeting(id)!
-    if (transcript.length > 0) {
-      set({ status: 'summarizing', error: undefined })
-      // Only the user's own notes: a summary Kasha wrote earlier is rewritten, not summarized.
-      const s = await summarize(
-        {
-          title: meeting.title,
-          meetingDate: new Date(meeting.recordingStartedAt ?? meeting.createdAt),
-          myName: store.getSettings().myName,
-          speakers: meeting.speakers,
-          attendees: meeting.attendees,
-          participants: meeting.participants
-        },
-        splitNote(store.readNote(id)).user,
-        transcript,
-        store.getSettings().summaryEngine
-      )
-      // Re-read: the user may have typed while Claude was working.
-      const current = splitNote(store.readNote(id))
-      const latest = current.user.trim()
-      const mine = latest ? `## Your notes\n\n${latest}\n` : ''
-      store.writeNote(id, `${carryChecks(current.generated, summaryMarkdown(s, latest))}\n${mine}`)
-      meeting = store.getMeeting(id)!
-      // Names worked out from the conversation are shown as guesses until confirmed.
-      // They aren't learned as voices until then.
-      const { names, guesses } = speakerGuesses(s, transcript, meeting.speakers)
-      log('summarized', { engine: s.engine, guessedNames: Object.keys(guesses).length, secs: secs() })
-      set({
-        speakers: { ...meeting.speakers, ...names },
-        speakerGuesses: { ...meeting.speakerGuesses, ...guesses },
-        summaryEngine: s.engine,
-        summaryOutdated: false,
-        title: s.title && GENERIC_TITLE.test(meeting.title) ? s.title : meeting.title,
-        tags: Array.from(new Set([...meeting.tags, ...(store.getSettings().tags.fromSummary ? s.tags : [])]))
-      })
+    // Who's who, once per meeting: after transcribing, or when a crash or
+    // quit stopped it part way (the meeting was left 'separating'), or on
+    // Retry after a failure. Not on "Update summary": that would bring back
+    // guesses the user turned down.
+    const cur = store.getMeeting(id)
+    // Notes processed before this step existed: already split or named, so not again.
+    const before = !fresh && (transcript.some((s) => /^s\d+$/.test(s.speaker)) || Object.keys(cur?.speakers ?? {}).length > 0)
+    if (transcript.length && !cur?.separated && !before && (fresh || wasStatus === 'separating' || wasStatus === 'failed')) {
+      transcript = await identify(id, transcript, tracks, set, secs, () => ev.settingsChanged(), ev.inCall)
     }
 
-    meeting = set({ status: 'ready', error: undefined })
+    let meeting = store.getMeeting(id)!
+    // A summary that can't be written (Claude signed out, a network error)
+    // doesn't fail the meeting: the transcript is done and is still synced.
+    let summaryError: string | undefined
+    if (transcript.length > 0) {
+      set({ status: 'summarizing', error: undefined })
+      try {
+        // Only the user's own notes: a summary Kasha wrote earlier is rewritten, not summarized.
+        const s = await summarize(
+          {
+            title: meeting.title,
+            meetingDate: new Date(meeting.recordingStartedAt ?? meeting.createdAt),
+            myName: store.getSettings().myName,
+            speakers: meeting.speakers,
+            guessed: Object.keys(meeting.speakerGuesses ?? {}) as SpeakerId[],
+            attendees: meeting.attendees,
+            participants: meeting.participants
+          },
+          splitNote(store.readNote(id)).user,
+          transcript,
+          store.getSettings().summaryEngine
+        )
+        // Re-read: the user may have typed while Claude was working.
+        const current = splitNote(store.readNote(id))
+        const latest = current.user.trim()
+        const mine = latest ? `## Your notes\n\n${latest}\n` : ''
+        store.writeNote(id, `${carryChecks(current.generated, summaryMarkdown(s, latest))}\n${mine}`)
+        meeting = store.getMeeting(id)!
+        // Names worked out from the conversation are shown as guesses until confirmed.
+        // They aren't learned as voices until then.
+        const { names, guesses } = speakerGuesses(s, transcript, meeting.speakers)
+        // The summary may give only a first name. When exactly one person in the
+        // call or invite has it, offer their full name (Kasha's own list, not the model's).
+        const known = [...(meeting.participants ?? []), ...(meeting.attendees ?? [])].filter((n) => !n.includes('@'))
+        for (const [sid, n] of Object.entries(names) as Array<[SpeakerId, string]>) {
+          if (!n || /\s/.test(n.trim())) continue
+          const first = n.trim().toLowerCase()
+          const full = [...new Set(known.filter((k) => k.trim().toLowerCase().split(/\s+/)[0] === first))]
+          if (full.length === 1) names[sid] = full[0]
+        }
+        log('summarized', { engine: s.engine, guessedNames: Object.keys(guesses).length, secs: secs() })
+        set({
+          speakers: { ...meeting.speakers, ...names },
+          speakerGuesses: { ...meeting.speakerGuesses, ...guesses },
+          summaryEngine: s.engine,
+          summaryOutdated: false,
+          summaryFailed: false,
+          title: s.title && GENERIC_TITLE.test(meeting.title) ? s.title : meeting.title,
+          tags: Array.from(new Set([...meeting.tags, ...(store.getSettings().tags.fromSummary ? s.tags : [])]))
+        })
+      } catch (e) {
+        log('summary-failed', { error: (e as Error).message.slice(0, 200), secs: secs() })
+        summaryError = `The summary couldn't be written (${(e as Error).message.slice(0, 160)}). The transcript is saved; select Update summary to try again.`
+      }
+    }
+
+    meeting = set({ status: 'ready', error: summaryError, ...(summaryError ? { summaryFailed: true } : {}) })
     const settings = store.getSettings()
     if (settings.obsidian.syncOnEnd && settings.obsidian.vault) {
       meeting = set({

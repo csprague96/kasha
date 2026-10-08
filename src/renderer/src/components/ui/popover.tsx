@@ -4,6 +4,8 @@ import { cn } from '@/lib/utils'
 
 export const Popover = PopoverPrimitive.Root
 export const PopoverTrigger = PopoverPrimitive.Trigger
+/** Positions the popover against an element without making it a toggle (for a text box). */
+export const PopoverAnchor = PopoverPrimitive.Anchor
 
 export function PopoverContent({ className, align = 'end', sideOffset = 6, ...props }: ComponentProps<typeof PopoverPrimitive.Content>) {
   return (

@@ -75,6 +75,19 @@ function run(exe: string, args: string[], keepStderr = false): Promise<{ code: n
 
 const lastLine = (s: string) => s.trim().split('\n').pop() ?? ''
 
+/**
+ * Deletes a working file. A file still held open (antivirus scanning it, say)
+ * mustn't turn finished work into a failure, so errors are ignored: the
+ * meeting folder is cleaned up with the audio later anyway.
+ */
+function tidy(file: string): void {
+  try {
+    rmSync(file, { force: true })
+  } catch {
+    /* left behind */
+  }
+}
+
 // ---------- Audio ----------
 
 function readPcm(fd: number, start: number, end: number): Buffer {
@@ -141,7 +154,7 @@ export async function detectSpeech(track: string, window?: Span & { tmp: string 
       end: offset + Number(m[2]) / 100
     }))
   } finally {
-    if (window) rmSync(window.tmp, { force: true })
+    if (window) tidy(window.tmp)
   }
 }
 
@@ -319,8 +332,8 @@ export async function transcribeChunk(
     if (code !== 0) throw new Error(`Transcription failed (exit ${code}). ${lastLine(err)}`)
     return toLines(whisperGroups(JSON.parse(readFileSync(`${tmp}.json`, 'utf8')) as WhisperJson), chunk, speaker)
   } finally {
-    rmSync(wav, { force: true })
-    rmSync(`${tmp}.json`, { force: true })
+    tidy(wav)
+    tidy(`${tmp}.json`)
   }
 }
 
