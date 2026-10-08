@@ -69,7 +69,7 @@ if (process.env.KASHA_DATA_DIR) app.setPath('userData', process.env.KASHA_DATA_D
 crashReporter.start({ uploadToServer: false })
 
 /** Error text for the log, without file paths (they can hold meeting titles). */
-const scrub = (e: unknown) => String((e as Error)?.message ?? e).replace(/[A-Za-z]:[\\/][^'"\n]*/g, '<path>').slice(0, 200)
+const scrub = (e: unknown) => String((e as Error)?.message ?? e).replace(/(?<![A-Za-z])[A-Za-z]:[\\/].*$|\\\\.*$/s, '<path>').slice(0, 200)
 process.on('uncaughtException', (e) => log('error', { where: 'main', error: scrub(e) }))
 process.on('unhandledRejection', (e) => log('error', { where: 'promise', error: scrub(e) }))
 
@@ -114,6 +114,8 @@ interface ActiveRecording extends RecordingInfo {
   roster: TeamsRoster | null
   /** When audio last arrived from the bar, to notice capture that stopped silently. */
   lastAudio: number
+  /** The bar couldn't open the mic or the computer's audio: nothing to watch for. */
+  noCapture?: boolean
 }
 let recording: ActiveRecording | null = null
 
@@ -360,6 +362,7 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
   // The clock carries on from the first part, so note timestamps match the audio.
   const startedAt = resume && meeting.recordingStartedAt ? Date.parse(meeting.recordingStartedAt) : Date.now() - had * 1000
   if (resume) rec.padTo((Date.now() - startedAt) / 1000)
+  if (resume || leftover) rec.realign()
   meeting = store.updateMeeting(meeting.id, {
     status: 'recording',
     recordingStartedAt: new Date(startedAt).toISOString(),
@@ -443,6 +446,9 @@ function restartCapture(reason: string): void {
   }
   recording.restarts.push(now)
   const added = recording.rec.padTo((now - recording.startedAt) / 1000)
+  // The new bar's audio starts a moment later still: line it up when it arrives.
+  recording.rec.realign()
+  recording.noCapture = false
   for (const [track, bytes] of Object.entries(added)) recording.live?.wrote(track as Track, bytes)
   log('capture-restarted', { reason, gapSecs: Math.round(Math.max(0, ...Object.values(added)) / 2 / SAMPLE_RATE) })
   const old = barWin
@@ -486,7 +492,7 @@ function watchAudio(): void {
       audioWatch = null
       return
     }
-    if (!recording.stopping && Date.now() - recording.lastAudio > 15_000) {
+    if (!recording.stopping && !recording.noCapture && Date.now() - recording.lastAudio > 15_000) {
       recording.lastAudio = Date.now()
       restartCapture('no-audio')
     }
@@ -533,7 +539,8 @@ function finalizeRecording(): void {
   store.updateMeeting(meetingId, {
     recordingEndedAt: new Date().toISOString(),
     status: tracks.length ? 'transcribing' : 'ready',
-    error: tracks.length ? undefined : 'No audio was captured.'
+    // Keep a more specific reason (the mic or system audio couldn't be opened).
+    error: tracks.length ? undefined : (store.getMeeting(meetingId)?.error ?? 'No audio was captured.')
   })
   if (barWin && !barWin.isDestroyed()) barWin.destroy()
   barWin = null
@@ -741,7 +748,8 @@ function registerIpc(): void {
   })
   handle('meetings:saveImage', (id: string, data: ArrayBuffer, ext: string) => {
     const safeExt = /^(png|jpe?g|gif|webp)$/i.test(ext) ? ext.toLowerCase() : 'png'
-    const name = `image-${Date.now()}.${safeExt}`
+    // Not a bare 13-digit number: that can pass the card check and get redacted out of the note.
+    const name = `image-${Date.now().toString(36)}.${safeExt}`
     writeFileSync(join(store.paths.meeting(id), 'attachments', name), Buffer.from(data))
     return `attachments/${name}`
   })
@@ -972,6 +980,7 @@ function registerIpc(): void {
   })
   ipcMain.on('bar:captureStarted', (_e, tracks: { mic: boolean; sys: boolean }) => {
     if (recording && !tracks.mic && !tracks.sys) {
+      recording.noCapture = true
       store.updateMeeting(recording.meetingId, { error: 'Kasha could not access the microphone or system audio.' })
     }
   })
@@ -1123,6 +1132,12 @@ app.whenReady().then(() => {
   if (!process.env.KASHA_NO_DETECT) detector.start()
   reminders.start()
   powerMonitor.on('resume', () => reminders.check())
+  // A sleeping PC drops the call too: end the recording rather than pad hours of silence on waking.
+  powerMonitor.on('suspend', () => {
+    if (!recording) return
+    log('recording-stopped-for-sleep')
+    stopRecording()
+  })
   powerMonitor.on('unlock-screen', () => reminders.check())
 
   const hidden = process.argv.includes('--hidden')

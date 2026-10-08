@@ -143,8 +143,11 @@ export function readTranscript(id: string): TranscriptSegment[] {
 }
 
 /** Redacted line by line and across a speaker's nearby lines, whoever writes it (see redact.ts). */
-export function writeTranscript(id: string, segs: TranscriptSegment[]): void {
-  writeAtomic(join(paths.meeting(id), 'transcript.json'), JSON.stringify(redactLines(segs), null, 1))
+export function writeTranscript(id: string, segs: TranscriptSegment[]): TranscriptSegment[] {
+  const out = redactLines(segs)
+  writeAtomic(join(paths.meeting(id), 'transcript.json'), JSON.stringify(out, null, 1))
+  // What was written: callers carry on with this, not their unredacted copy.
+  return out
 }
 
 export function deleteMeeting(id: string): void {

@@ -61,6 +61,8 @@ export interface Meeting {
   speakerGuesses?: Partial<Record<SpeakerId, { evidence: string }>>
   /** Who's who has been worked out (voices told apart, names offered), so it isn't done again. */
   separated?: boolean
+  /** The summary couldn't be written (the error says why); the note offers Update summary. */
+  summaryFailed?: boolean
   /** Speakers were renamed or the transcript changed after the summary was written. */
   summaryOutdated?: boolean
   tags: string[]

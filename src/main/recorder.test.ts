@@ -27,6 +27,15 @@ describe('Recording', () => {
     expect(r.lengths()).toEqual({ sys: 3.5 * second })
   })
 
+  it('lines tracks up again after capture restarts', () => {
+    const r = new Recording(fresh())
+    r.write('mic', Buffer.alloc(5 * second, 1))
+    r.realign()
+    expect(r.lead('mic', 8)).toBe(3 * second) // up to the clock, from where it was
+    expect(r.lead('mic', 9)).toBe(0) // once only
+    expect(r.lead('sys', 8)).toBe(8 * second) // a track that never had audio
+  })
+
   it('keeps the WAV header right while recording, and after a crash', () => {
     const d = fresh()
     const r = new Recording(d)

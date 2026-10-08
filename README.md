@@ -79,7 +79,7 @@ Tell people on the call when you're transcribing.
 
 ### Compliance
 
-- Card numbers (Luhn-checked, 13–19 digits), SSNs and card security codes are replaced with `[card number]`, `[SSN]` and `[security code]` in everything Kasha writes to disk: transcripts, typed notes, notes from the bar and summaries. They are caught however speech-to-text writes them: grouped with spaces, dashes, commas, periods or slashes, spoken as words ("four one one one", "double four"), or read in groups across several lines (the same speaker within 10 seconds). Text is redacted again where it leaves the app: the summary prompt, Obsidian and shared copies. `src/main/redact.test.ts` holds the cases, with test card numbers only.
+- Card numbers (Luhn-checked, 13–19 digits), SSNs and card security codes are replaced with `[card number]`, `[SSN]` and `[security code]` in everything Kasha writes to disk: transcripts, typed notes, notes from the bar and summaries. They are caught however speech-to-text writes them: grouped with spaces, dashes, commas, periods, slashes or ellipses, with an "and" or "uh" between groups, spoken as words ("four one one one", "double four"), or read in groups across several lines of the computer's audio within 10 seconds. A security code or SSN is also caught when it answers a question asked a moment before ("And the code on the back?"). To keep dates, phone numbers, amounts and lists intact, a number only counts as a card if it starts like one (2-6), passes the Luhn check and is grouped the way cards are read out (4-4-4-4, 4-6-5, digit by digit, or one unbroken number), unless a word like "card" or "Visa" comes just before it. Link targets, web addresses and attachment names are never changed. Text is redacted again where it leaves the app: the summary prompt, Obsidian and shared copies. `src/main/redact.test.ts` holds the cases, with test card numbers only.
 - The summary prompt tells the model never to include card numbers, account numbers, SSNs or passwords.
 - Codex use was approved by compliance. Use a company ChatGPT account for it, not a personal one.
 - Audio stays on the device and is deleted once transcribed. With **Keep audio for 7 days** on, it stays on the PC for a week (each note shows when it goes, with **Save a copy** and **Delete now**) and is then deleted automatically.
@@ -103,6 +103,7 @@ Tell people on the call when you're transcribing.
 - One chunk that fails to transcribe during a call is retried, then tried once more after the call; it no longer stops live transcription. If the summary can't be written (Claude signed out, a network error), the note is still saved and synced with the transcript, and says to select **Update summary**.
 - While a call is being recorded, finishing the previous meeting uses fewer threads, so the call comes first.
 - Opening Kasha while it is already running just shows the running copy.
+- If the PC goes to sleep during a recording, the recording ends there (the call drops too), rather than filling the sleep with silence.
 
 ## Development
 

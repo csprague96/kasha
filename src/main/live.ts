@@ -43,6 +43,8 @@ export class LiveTranscriber {
   /** Chunks that failed twice during the call: tried once more at the end. */
   private redo: Array<{ track: Track; chunk: Chunk; n: number }> = []
   private vadFailures = 0
+  /** Chunks that failed in a row: a fault that lasts stops live work instead of doubling it. */
+  private chunkFailures = 0
   /** Few threads during the call; all of them for what's left after it. */
   private threads = LIVE_THREADS
   private timer: NodeJS.Timeout
@@ -239,10 +241,14 @@ export class LiveTranscriber {
             }
             this.segments.push(...segs)
             if (segs.length) this.onSegments(segs)
+            this.chunkFailures = 0
           } catch (e) {
-            // Not the end of live transcription: this chunk is tried again after the call.
+            // Not the end of live transcription: this chunk is tried again after the
+            // call. Three in a row is a lasting fault: the recording is transcribed
+            // from scratch afterwards, as before.
             log('live-chunk-failed', { error: (e as Error).message.slice(0, 120) })
             this.redo.push({ track, chunk, n })
+            if (++this.chunkFailures >= 3) this.failed = e as Error
           } finally {
             this.finished++
             this.onProgress?.(this.finished / this.chunks)

@@ -118,7 +118,7 @@ async function identify(
       })
       transcript = r.transcript
       matches = r.matches
-      store.writeTranscript(id, transcript)
+      transcript = store.writeTranscript(id, transcript)
       const talk = new Map<string, number>()
       for (const s of transcript) if (s.speaker !== 'you') talk.set(s.speaker, (talk.get(s.speaker) ?? 0) + s.end - s.start)
       log('speakers', {
@@ -178,7 +178,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
         ? finalize(tracks, fromLive)
         : await transcribe(tracks, whisperPrompt(store.getSettings()), progress, threads)
       transcript = segs.map((s) => ({ ...s, text: cleanText(s.text) }))
-      store.writeTranscript(id, transcript)
+      transcript = store.writeTranscript(id, transcript)
       ev.progress(id, null)
       log('transcribed', { lines: transcript.length, fromLive: !!fromLive, secs: secs() })
     } else {
@@ -242,6 +242,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
           speakerGuesses: { ...meeting.speakerGuesses, ...guesses },
           summaryEngine: s.engine,
           summaryOutdated: false,
+          summaryFailed: false,
           title: s.title && GENERIC_TITLE.test(meeting.title) ? s.title : meeting.title,
           tags: Array.from(new Set([...meeting.tags, ...(store.getSettings().tags.fromSummary ? s.tags : [])]))
         })
@@ -251,7 +252,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
       }
     }
 
-    meeting = set({ status: 'ready', error: summaryError })
+    meeting = set({ status: 'ready', error: summaryError, ...(summaryError ? { summaryFailed: true } : {}) })
     const settings = store.getSettings()
     if (settings.obsidian.syncOnEnd && settings.obsidian.vault) {
       meeting = set({

@@ -37,6 +37,16 @@ describe('LiveTranscriber.finish', () => {
     expect(out?.map((s) => s.text)).toEqual(['late'])
   })
 
+  it('stops live work after three chunks fail in a row', async () => {
+    detect.mockResolvedValue([{ start: 0.5, end: 25 }, { start: 26, end: 50 }, { start: 51, end: 75 }, { start: 76, end: 99 }])
+    transcribe.mockRejectedValue(new Error('broken'))
+    const live = new LiveTranscriber('C:/nowhere', '', () => undefined, () => false, () => undefined)
+    live.wrote('sys', 16000 * 2 * 100)
+    expect(await live.finish(() => undefined, 2)).toBeNull()
+    // Two tries each for the first three chunks, then nothing more.
+    expect(transcribe.mock.calls.length).toBe(6)
+  })
+
   it('falls back to transcribing from scratch only when a chunk never works', async () => {
     transcribe.mockRejectedValue(new Error('broken'))
     expect(await make().finish(() => undefined, 2)).toBeNull()
