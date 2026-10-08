@@ -129,6 +129,17 @@ export class Recording {
     return added
   }
 
+  /**
+   * Silence at the start of a track that hasn't had any audio yet, so its
+   * first sound sits at `seconds` into the recording. Returns the bytes added.
+   */
+  lead(track: Track, seconds: number): number {
+    if (this.writers[track] || seconds < 0.05) return 0
+    const bytes = Math.floor(seconds * SAMPLE_RATE) * 2
+    this.write(track, Buffer.alloc(bytes))
+    return bytes
+  }
+
   /** Closes files and returns the tracks that captured any audio. */
   close(): Array<{ track: Track; file: string }> {
     const out: Array<{ track: Track; file: string }> = []

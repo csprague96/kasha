@@ -32,6 +32,8 @@ export interface SpeakerRequest {
    * the voice most like them when they sound alike (see consolidate).
    */
   max?: number
+  /** For measuring only: overrides WINDOW_SHIFT. */
+  windowShift?: number
 }
 
 export interface SpeakerCluster {
@@ -42,8 +44,18 @@ export interface SpeakerCluster {
   capped?: boolean
 }
 
+/** Seconds spent in each step, for the log. */
+export interface SpeakerTimings {
+  diarize: number
+  windows: number
+  group: number
+  voiceprints: number
+  windowCount: number
+}
+
 export interface SpeakerResponse {
   clusters?: SpeakerCluster[]
+  timings?: SpeakerTimings
   error?: string
 }
 
@@ -61,6 +73,11 @@ const BLOCK = 15 * 60 // seconds of speech analysed at once
  * people) and 0.4-0.7 (same person), with the valley at 0.2-0.3.
  */
 const CLUSTER_THRESHOLD = 0.5 // pyannote's grouping; only its turn boundaries are used
+// pyannote looks at 10 s of audio at a time. sherpa moves that window by 1 s
+// (0.1) by default and takes a voiceprint per window and speaker, all for a
+// grouping Kasha replaces with its own: most of the work, thrown away. Moving
+// it by 5 s still finds the turns, which Kasha cuts into 2.5 s windows anyway.
+const WINDOW_SHIFT = 0.5
 const WINDOW = 2.5 // seconds of speech per voiceprint; long turns can hide a change of speaker
 const MIN_WINDOW = 1.0 // shorter turns are too short for a voiceprint; they follow the nearest window
 const CUT = 0.3 // windows grouped while their average similarity is at least this
@@ -278,15 +295,17 @@ export function consolidate(clusters: SpeakerCluster[], max?: number): SpeakerCl
   return list.sort((a, b) => a.segments[0].start - b.segments[0].start)
 }
 
-export function separate(req: SpeakerRequest): SpeakerCluster[] {
+export function separate(req: SpeakerRequest): { clusters: SpeakerCluster[]; timings: SpeakerTimings } {
+  const timings: SpeakerTimings = { diarize: 0, windows: 0, group: 0, voiceprints: 0, windowCount: 0 }
+  const since = (t: number) => (Date.now() - t) / 1000
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const sherpa = require('sherpa-onnx-node')
   const length = (statSync(req.wav).size - 44) / 2 / RATE
   const spans = mergeSpans(req.spans, length)
-  if (!spans.length) return []
+  if (!spans.length) return { clusters: [], timings }
 
   const diarizer = new sherpa.OfflineSpeakerDiarization({
-    segmentation: { pyannote: { model: req.segmentationModel }, numThreads: req.threads },
+    segmentation: { pyannote: { model: req.segmentationModel, windowShiftRatio: req.windowShift ?? WINDOW_SHIFT }, numThreads: req.threads },
     embedding: { model: req.embeddingModel, numThreads: req.threads },
     clustering: { numClusters: -1, threshold: CLUSTER_THRESHOLD },
     minDurationOn: 0.3,
@@ -329,7 +348,10 @@ export function separate(req: SpeakerRequest): SpeakerCluster[] {
     const short: Span[][] = []
     for (const pieces of layout(spans)) {
       const audio = audioFor(fd, pieces)
+      let t = Date.now()
       const found: Span[] = diarizer.process(audio)
+      timings.diarize += since(t)
+      t = Date.now()
       // Cut turns into windows and take a voiceprint of each.
       for (const f of found) {
         const len = f.end - f.start
@@ -350,9 +372,13 @@ export function separate(req: SpeakerRequest): SpeakerCluster[] {
           windows.push({ segs, seconds: w, v: Array.from(extractor.compute(stream, false) as Float32Array) })
         }
       }
+      timings.windows += since(t)
     }
-    if (!windows.length) return []
+    timings.windowCount = windows.length
+    if (!windows.length) return { clusters: [], timings }
+    let t = Date.now()
     const group = groupWithHint(windows.map((w) => w.v), windows.map((w) => w.seconds), req.expected)
+    timings.group = since(t)
     // Turns too short for a voiceprint go with the nearest window in time.
     const nearest = (segs: Span[]) => {
       const s = { start: segs[0].start, end: segs[segs.length - 1].end }
@@ -374,6 +400,7 @@ export function separate(req: SpeakerRequest): SpeakerCluster[] {
     }
     windows.forEach((w, i) => add(group[i], w.segs))
     for (const segs of short) add(nearest(segs), segs)
+    t = Date.now()
     const clusters: SpeakerCluster[] = []
     for (const segments of byId.values()) {
       segments.sort((a, b) => a.start - b.start)
@@ -381,7 +408,9 @@ export function separate(req: SpeakerRequest): SpeakerCluster[] {
       if (seconds < 0.5) continue
       clusters.push({ segments, seconds, embedding: embeddingOf(segments) })
     }
-    return consolidate(clusters, req.max)
+    const merged = consolidate(clusters, req.max)
+    timings.voiceprints = since(t)
+    return { clusters: merged, timings }
   } finally {
     closeSync(fd)
   }
@@ -396,7 +425,7 @@ function respond(res: SpeakerResponse): void {
 
 function handle(req: SpeakerRequest): void {
   try {
-    respond({ clusters: separate(req) })
+    respond(separate(req))
   } catch (e) {
     respond({ error: (e as Error).message })
   }

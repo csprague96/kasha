@@ -2,7 +2,8 @@ import { freemem } from 'node:os'
 import { join } from 'node:path'
 import type { LiveState, TranscriptSegment } from '@shared/types'
 import { SAMPLE_RATE, type Track } from './recorder'
-import { addSpeech, detectSpeech, LIVE_THREADS, takeChunk, transcribeChunk, type Span } from './speech'
+import { log } from './log'
+import { addSpeech, BATCH_THREADS, detectSpeech, LIVE_THREADS, takeChunk, transcribeChunk, type Chunk, type Span } from './speech'
 import { speakerOf } from './transcriber'
 
 const TICK_MS = 10_000
@@ -39,6 +40,11 @@ export class LiveTranscriber {
   private work: Promise<void> = Promise.resolve()
   private checking: Promise<void> | null = null
   private failed: Error | null = null
+  /** Chunks that failed twice during the call: tried once more at the end. */
+  private redo: Array<{ track: Track; chunk: Chunk; n: number }> = []
+  private vadFailures = 0
+  /** Few threads during the call; all of them for what's left after it. */
+  private threads = LIVE_THREADS
   private timer: NodeJS.Timeout
   private onProgress: ((p: number) => void) | null = null
   /** Free memory when the low-memory wait last started or ended, for the log. */
@@ -139,17 +145,35 @@ export class LiveTranscriber {
    * Transcribes what's left after the recording stops and waits for it. Returns
    * null if anything failed, so the caller can transcribe the files from scratch.
    */
-  async finish(onProgress: (p: number) => void): Promise<TranscriptSegment[] | null> {
+  async finish(onProgress: (p: number) => void, threads = BATCH_THREADS): Promise<TranscriptSegment[] | null> {
     clearInterval(this.timer)
-    // After the call, held-back work runs regardless.
+    // After the call, held-back work runs regardless, and faster unless another call has started.
     this.finishing = true
+    this.threads = threads
+    log('live-finishing', { chunksLeft: this.chunks - this.finished, threads })
     this.changed()
     this.onProgress = onProgress
     await this.checking
     await this.check(true)
     onProgress(this.chunks ? this.finished / this.chunks : 0)
     await this.work
+    // What failed during the call gets one more try; if it still fails, the
+    // recording is transcribed from scratch instead.
+    for (const r of this.redo) {
+      if (this.failed) break
+      try {
+        this.segments.push(...(await this.transcribe(r.track, r.chunk, r.n)))
+      } catch (e) {
+        this.failed = e as Error
+      }
+    }
+    this.redo = []
     return this.failed ? null : this.current()
+  }
+
+  private transcribe(track: Track, chunk: Chunk, n: number): Promise<TranscriptSegment[]> {
+    const t = this.tracks[track]!
+    return transcribeChunk(t.file, chunk, speakerOf(track), { prompt: this.prompt, threads: this.threads }, join(this.dir, `live-${n}`))
   }
 
   stop(): void {
@@ -162,8 +186,16 @@ export class LiveTranscriber {
   private check(final: boolean): Promise<void> {
     if (this.checking || this.failed) return this.checking ?? Promise.resolve()
     if (!final && this.paused()) return Promise.resolve()
+    // Finding speech failing once (a file briefly locked, say) only skips this
+    // look: it's tried again on the next one. Three in a row end live
+    // transcription, and the recording is transcribed after the call.
     this.checking = this.findSpeech(final)
-      .catch((e) => void (this.failed = e as Error))
+      .then(() => void (this.vadFailures = 0))
+      .catch((e) => {
+        this.vadFailures++
+        log('live-vad-failed', { error: (e as Error).message.slice(0, 120), times: this.vadFailures })
+        if (this.vadFailures >= 3 || final) this.failed = e as Error
+      })
       .finally(() => (this.checking = null))
     return this.checking
   }
@@ -198,11 +230,19 @@ export class LiveTranscriber {
           await this.whenRunning()
           if (this.failed) return
           try {
-            const segs = await transcribeChunk(t.file, chunk, speakerOf(track), { prompt: this.prompt, threads: LIVE_THREADS }, join(this.dir, `live-${n}`))
+            let segs: TranscriptSegment[]
+            try {
+              segs = await this.transcribe(track, chunk, n)
+            } catch {
+              // Once more: a one-off failure shouldn't lose the chunk.
+              segs = await this.transcribe(track, chunk, n)
+            }
             this.segments.push(...segs)
             if (segs.length) this.onSegments(segs)
           } catch (e) {
-            this.failed = e as Error
+            // Not the end of live transcription: this chunk is tried again after the call.
+            log('live-chunk-failed', { error: (e as Error).message.slice(0, 120) })
+            this.redo.push({ track, chunk, n })
           } finally {
             this.finished++
             this.onProgress?.(this.finished / this.chunks)

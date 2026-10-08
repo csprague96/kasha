@@ -72,7 +72,8 @@ export function finalize(tracks: Array<{ track: Track; file: string }>, segs: Tr
 export async function transcribe(
   tracks: Array<{ track: Track; file: string }>,
   prompt: string,
-  onProgress: (p: number) => void
+  onProgress: (p: number) => void,
+  threads = BATCH_THREADS
 ): Promise<TranscriptSegment[]> {
   const jobs: Array<{ track: Track; file: string; chunk: Chunk }> = []
   for (const t of tracks) {
@@ -85,7 +86,7 @@ export async function transcribe(
   for (let i = 0; i < jobs.length; i++) {
     const { track, file, chunk } = jobs[i]
     const tmp = file.replace(/\.wav$/, `-chunk${i}`)
-    segs.push(...(await transcribeChunk(file, chunk, speakerOf(track), { prompt, threads: BATCH_THREADS }, tmp)))
+    segs.push(...(await transcribeChunk(file, chunk, speakerOf(track), { prompt, threads }, tmp)))
     onProgress((i + 1) / jobs.length)
   }
   return finalize(tracks, segs)

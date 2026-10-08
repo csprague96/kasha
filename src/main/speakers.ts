@@ -5,6 +5,7 @@ import { basename, join } from 'node:path'
 import type { Meeting, SpeakerId, TranscriptSegment } from '@shared/types'
 import { speakerPaths } from './setup'
 import type { SpeakerCluster, SpeakerRequest, SpeakerResponse } from './speakers-worker'
+import { log } from './log'
 import { BATCH_THREADS } from './speech'
 import * as store from './store'
 import * as voices from './voices'
@@ -14,6 +15,7 @@ import * as voices from './voices'
  * from a past meeting, names them. Everything runs on this PC.
  */
 
+/** At least this long, and longer for calls with a lot of talking (see runWorker). */
 const TIMEOUT_MS = 30 * 60_000
 /** Voices with less speech than this aren't reliable enough to name or learn. */
 const MIN_SECONDS = 8
@@ -43,13 +45,17 @@ export function readEmbeddings(meetingId: string): SpeakerPrints {
   }
 }
 
-function runWorker(req: SpeakerRequest): Promise<SpeakerCluster[]> {
+function runWorker(req: SpeakerRequest): Promise<SpeakerResponse> {
+  // About a second of work per second of speech on the slowest PCs seen, so a
+  // long, talk-heavy call isn't cut off and left as one "Others".
+  const speech = req.spans.reduce((t, s) => t + s.end - s.start, 0)
+  const limit = Math.max(TIMEOUT_MS, speech * 1000 * (6 / Math.max(1, req.threads)))
   return new Promise((resolve, reject) => {
     const child = utilityProcess.fork(join(__dirname, 'speakers-worker.js'), [], { serviceName: 'Kasha speakers', stdio: 'ignore' })
     const timer = setTimeout(() => {
       child.kill()
       reject(new Error('Telling speakers apart took too long.'))
-    }, TIMEOUT_MS)
+    }, limit)
     let done = false
     const finish = (fn: () => void) => {
       if (done) return
@@ -65,7 +71,7 @@ function runWorker(req: SpeakerRequest): Promise<SpeakerCluster[]> {
       }
       child.postMessage(req)
     })
-    child.on('message', (res: SpeakerResponse) => finish(() => (res.error ? reject(new Error(res.error)) : resolve(res.clusters ?? []))))
+    child.on('message', (res: SpeakerResponse) => finish(() => (res.error ? reject(new Error(res.error)) : resolve(res))))
     child.on('exit', (code) => finish(() => reject(new Error(`Speaker worker exited (${code}).`))))
   })
 }
@@ -161,19 +167,23 @@ export async function separateSpeakers(
   meetingId: string,
   sysWav: string,
   transcript: TranscriptSegment[],
-  opts: { expected?: number; max?: number; candidates?: string[] } = {}
+  opts: { expected?: number; max?: number; candidates?: string[]; threads?: number } = {}
 ): Promise<SeparateResult> {
   const spans = transcript.filter((s) => s.speaker === 'others').map((s) => ({ start: s.start, end: s.end }))
   if (!spans.length) return { transcript, matches: {}, capped: [] }
-  const clusters = await runWorker({
+  const threads = opts.threads ?? BATCH_THREADS
+  const res = await runWorker({
     wav: sysWav,
     spans,
     segmentationModel: speakerPaths.segmentation(),
     embeddingModel: speakerPaths.embedding(),
-    threads: BATCH_THREADS,
+    threads,
     expected: opts.expected,
     max: opts.max
   })
+  const clusters = res.clusters ?? []
+  // Numbers only: where the time went, to keep separation cheap.
+  if (res.timings) log('speakers-timings', { threads, ...Object.fromEntries(Object.entries(res.timings).map(([k, v]) => [k, Math.round(v)])) })
   const assigned = assignLines(transcript, clusters)
   const seconds = (id: SpeakerId) => assigned.transcript.filter((s) => s.speaker === id).reduce((t, s) => t + s.end - s.start, 0)
   const prints: SpeakerPrints['voices'] = {}

@@ -52,7 +52,10 @@ export class Updater {
       log('update-available', { version: info.version })
       this.set({ state: 'downloading', version: info.version, message: null, percent: 0 })
     })
-    autoUpdater.on('update-not-available', () => this.set({ state: 'idle', version: null, message: 'Kasha is up to date.' }))
+    autoUpdater.on('update-not-available', (info) => {
+      log('update-none', { latest: info?.version })
+      this.set({ state: 'idle', version: null, message: 'Kasha is up to date.' })
+    })
     autoUpdater.on('download-progress', (p) =>
       this.set({ state: 'downloading', version: this.status.version, message: null, percent: Math.floor(p.percent) })
     )
@@ -62,12 +65,14 @@ export class Updater {
     })
     autoUpdater.on('error', (err) => {
       const text = String(err?.message ?? err)
-      // Before the first release is published there is nothing to update to.
-      if (/no published versions|unable to find latest version|404/i.test(text)) {
+      // Only "nothing published yet" means up to date. A 404 used to count too,
+      // which hid a release missing latest.yml: copies said "up to date" and
+      // never updated.
+      log('update-failed', { error: text.slice(0, 200) })
+      if (/no published versions/i.test(text)) {
         this.set({ state: 'idle', version: null, message: 'Kasha is up to date.' })
         return
       }
-      log('update-failed', { error: text.slice(0, 200) })
       if (this.status.state === 'ready') return
       this.set({ state: 'error', version: null, message: 'Kasha couldn’t check for updates. It will try again later.' })
     })

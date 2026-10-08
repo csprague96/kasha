@@ -77,7 +77,13 @@ process.on('unhandledRejection', (e) => log('error', { where: 'promise', error: 
 app.disableHardwareAcceleration()
 app.setAppUserModelId('com.sola.kasha')
 
-if (!app.requestSingleInstanceLock()) app.quit()
+// Kasha is already running (the first copy is shown instead; see second-instance).
+// Exit now: app.quit() let this copy's startup run anyway, which marked the
+// running recording failed and processed its meetings a second time.
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0)
+  process.exit(0)
+}
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'kasha-file', privileges: { standard: true, secure: true, supportFetchAPI: true } }
@@ -106,6 +112,8 @@ interface ActiveRecording extends RecordingInfo {
   restarts: number[]
   /** Reads who's in the Teams call, for naming speakers. */
   roster: TeamsRoster | null
+  /** When audio last arrived from the bar, to notice capture that stopped silently. */
+  lastAudio: number
 }
 let recording: ActiveRecording | null = null
 
@@ -381,7 +389,7 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
   // A Teams call (detected, or recorded by hand while one is on): read who's in it.
   const roster = settings.speakers.fromTeams && (meeting.app === 'teams' || detector.isLive('teams')) ? new TeamsRoster(startedAt, id) : null
   void roster?.start()
-  recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted, restarts: [], roster }
+  recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted, restarts: [], roster, lastAudio: Date.now() }
   log('recording-started', { app: meeting.app, how: resume ? 'resume' : opts.auto ? 'auto' : opts.accepted ? 'prompt' : 'manual', live: !!live, model: settings.speechModel, carriedOnMin: had ? Math.round(had / 60) : undefined })
   closeToast()
   if ((opts.auto || resume) && Notification.isSupported()) {
@@ -399,6 +407,7 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
   if (calendar) void calendar.then((match) => onCalendar(id, match))
   openBar()
   startMemoryLog()
+  watchAudio()
   refreshTray()
   broadcast('recording-changed', recordingInfo())
   broadcast('meetings-changed')
@@ -423,7 +432,13 @@ function restartCapture(reason: string): void {
   recording.restarts = recording.restarts.filter((t) => now - t < 10 * 60_000)
   if (recording.restarts.length >= 5) {
     log('capture-gave-up', { reason })
-    store.updateMeeting(recording.meetingId, { error: 'Audio capture kept stopping, so Kasha stopped recording. What was recorded is kept.' })
+    // Said out loud: a recording that just stops looks like it's still going.
+    if (Notification.isSupported()) {
+      const id = recording.meetingId
+      const n = new Notification({ title: 'Recording stopped', body: 'Audio capture kept stopping, so Kasha stopped recording. What was recorded is kept.', silent: false })
+      n.on('click', () => showMain({ meetingId: id }))
+      n.show()
+    }
     return finalizeRecording()
   }
   recording.restarts.push(now)
@@ -458,6 +473,26 @@ function startMemoryLog(): void {
   memoryTimer = setInterval(sample, 5 * 60_000)
 }
 
+/**
+ * The bar sends audio (silence included) every half second while capture
+ * runs. None for 15 s means capture stopped without saying so.
+ */
+let audioWatch: NodeJS.Timeout | null = null
+function watchAudio(): void {
+  if (audioWatch) return
+  audioWatch = setInterval(() => {
+    if (!recording) {
+      if (audioWatch) clearInterval(audioWatch)
+      audioWatch = null
+      return
+    }
+    if (!recording.stopping && Date.now() - recording.lastAudio > 15_000) {
+      recording.lastAudio = Date.now()
+      restartCapture('no-audio')
+    }
+  }, 5_000)
+}
+
 /** Asks the bar to flush its last audio, then finalizes. Falls back after 3s. */
 function stopRecording(): void {
   if (!recording || recording.stopping) return
@@ -468,6 +503,7 @@ function stopRecording(): void {
 }
 
 const pipelineEvents: PipelineEvents = {
+  inCall: () => !!recording,
   settingsChanged: () => broadcast('settings-changed', store.getSettings()),
   changed: () => {
     broadcast('meetings-changed')
@@ -924,8 +960,15 @@ function registerIpc(): void {
     if (!recording || e.sender.id !== barWin?.webContents.id) return
     if (track !== 'mic' && track !== 'sys') return
     const buf = Buffer.from(pcm)
+    // A track's first audio is lined up with the recording's clock: capture
+    // starts a moment after it, and the computer's audio later than the mic
+    // (0.6-4.9 s measured), which put "Others" lines early against "You" and
+    // the Teams timeline.
+    const lead = recording.rec.lead(track, (Date.now() - recording.startedAt) / 1000 - buf.length / 2 / SAMPLE_RATE)
+    if (lead) recording.live?.wrote(track, lead)
     recording.rec.write(track, buf)
     recording.live?.wrote(track, buf.length)
+    recording.lastAudio = Date.now()
   })
   ipcMain.on('bar:captureStarted', (_e, tracks: { mic: boolean; sys: boolean }) => {
     if (recording && !tracks.mic && !tracks.sys) {
