@@ -7,6 +7,7 @@ import { Marked } from 'marked'
 import { attendance, attendanceSummary } from '@shared/attendance'
 import { APP_LABELS, shownName, type Meeting, type ShareOptions, type TranscriptSegment } from '@shared/types'
 import { exportFileName } from './obsidian'
+import { redact, redactLines } from './redact'
 import * as store from './store'
 
 const p2 = (n: number) => String(n).padStart(2, '0')
@@ -25,7 +26,10 @@ function metaLine(m: Meeting): string {
 }
 
 /** The shareable note as Markdown. Image links stay relative (attachments/x.png). */
-export function shareMarkdown(m: Meeting, note: string, transcript: TranscriptSegment[], opts: ShareOptions): string {
+export function shareMarkdown(m: Meeting, rawNote: string, rawTranscript: TranscriptSegment[], opts: ShareOptions): string {
+  // Redacted again on the way out, for notes written before redaction covered them.
+  const note = redact(rawNote)
+  const transcript = redactLines(rawTranscript)
   const out = [`# ${m.title}`, '', metaLine(m), '']
   const who = attendanceSummary(attendance(m, transcript, store.getSettings().myName))
   if (who.present.length || who.absent.length) {

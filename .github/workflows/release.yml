@@ -23,6 +23,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test
       - name: Is this version released already?
         id: version
         shell: bash

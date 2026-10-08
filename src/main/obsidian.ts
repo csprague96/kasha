@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSyn
 import { basename, dirname, extname, join } from 'node:path'
 import { attendance, attendanceSummary } from '@shared/attendance'
 import { APP_LABELS, shownName, type Meeting, type Settings, type TranscriptSegment } from '@shared/types'
+import { redact, redactLines } from './redact'
 import { paths } from './store'
 
 /** The Obsidian settings plus the standing tags every note gets. */
@@ -37,11 +38,14 @@ export function exportFileName(m: Meeting, template: string): string {
 
 export function buildMarkdown(
   m: Meeting,
-  note: string,
-  transcript: TranscriptSegment[],
+  rawNote: string,
+  rawTranscript: TranscriptSegment[],
   opts: ExportOptions,
   imageName: (rel: string) => string | null
 ): string {
+  // Redacted again on the way out, for notes written before redaction covered them.
+  const note = redact(rawNote)
+  const transcript = redactLines(rawTranscript)
   const d = new Date(m.recordingStartedAt ?? m.createdAt)
   const fm: string[] = [
     '---',

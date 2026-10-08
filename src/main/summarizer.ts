@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { speakerName, type Meeting, type Settings, type SpeakerId, type TranscriptSegment } from '@shared/types'
+import { redact, redactLines } from './redact'
 import { claudeExe, codexExe } from './setup'
 
 export interface Summary {
@@ -86,7 +87,10 @@ export interface SummaryContext {
   guessed?: SpeakerId[]
 }
 
-function buildPrompt(ctx: SummaryContext, notes: string, transcript: TranscriptSegment[]): string {
+function buildPrompt(ctx: SummaryContext, rawNotes: string, rawTranscript: TranscriptSegment[]): string {
+  // Nothing PCI-sensitive is sent, even from notes written before redaction covered them.
+  const notes = redact(rawNotes)
+  const transcript = redactLines(rawTranscript)
   // The note taker stays "You" even when named, so the rules above still apply.
   // A guessed name is labelled as one, so the summary doesn't state it as fact.
   const label = (t: TranscriptSegment) =>
@@ -132,7 +136,9 @@ export function emptyDir(name: string): string {
 
 /** Quotes args for cmd.exe when an npm .cmd shim has to be run through the shell. */
 function shellQuote(args: string[]): string[] {
-  return args.map((a) => (a === '' ? '""' : `"${a.replace(/"/g, '\\"')}"`))
+  // cmd.exe ends the command at a line break, which cut multi-line system
+  // prompts (and their rules) down to the first line: line breaks become spaces.
+  return args.map((a) => (a === '' ? '""' : `"${a.replace(/\r?\n/g, ' ').replace(/"/g, '\\"')}"`))
 }
 
 export function run(exe: string, args: string[], input: string, cwd: string, timeout = 5 * 60_000): Promise<{ stdout: string; stderr: string }> {

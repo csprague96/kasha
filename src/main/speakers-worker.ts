@@ -405,7 +405,7 @@ function handle(req: SpeakerRequest): void {
 
 if (process.parentPort) {
   process.parentPort.once('message', (e: { data: SpeakerRequest }) => handle(e.data))
-} else if (process.argv[2]) {
+} else if (process.argv[2]?.endsWith('.json')) {
   // Standalone, for tests: node speakers-worker.js request.json
   handle(JSON.parse(readFileSync(process.argv[2], 'utf8')) as SpeakerRequest)
 }

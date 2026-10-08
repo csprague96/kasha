@@ -23,9 +23,11 @@ export function log(event: string, data: Record<string, Value> = {}): void {
     } catch {
       /* no log yet */
     }
+    // Paths can hold a Windows user name or a meeting title: never logged.
+    const clean = (v: string) => v.replace(/[A-Za-z]:[\\/][^'"\n]*|\\\\[^'"\n]*/g, '<path>')
     const fields = Object.entries(data)
       .filter(([, v]) => v !== undefined)
-      .map(([k, v]) => `${k}=${typeof v === 'string' ? JSON.stringify(v) : v}`)
+      .map(([k, v]) => `${k}=${typeof v === 'string' ? JSON.stringify(clean(v)) : v}`)
       .join(' ')
     appendFileSync(file, `${new Date().toISOString()} ${event}${fields ? ` ${fields}` : ''}\n`)
   } catch {
