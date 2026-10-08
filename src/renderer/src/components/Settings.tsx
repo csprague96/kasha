@@ -338,14 +338,13 @@ function Voices({ recognize }: { recognize: boolean }) {
     return window.kasha.onMeetingsChanged(refresh)
   }, [])
   if (!voices) return null
-  if (!voices.length) {
-    return recognize ? (
-      <p className="text-[13px] text-muted">No voices learned yet. When you name or confirm a speaker in a transcript, Kasha learns the voice and offers the name next time.</p>
-    ) : null
-  }
   return (
     <div className="flex flex-col gap-2">
-      {!recognize && <p className="text-[13px] text-muted">Recognition is off, but these voices are still stored. Forget them below.</p>}
+      {!voices.length && recognize && (
+        <p className="text-[13px] text-muted">No voices learned yet. When you name or confirm a speaker in a transcript, Kasha learns the voice and offers the name next time.</p>
+      )}
+      {voices.length > 0 && !recognize && <p className="text-[13px] text-muted">Recognition is off, but these voices are still stored. Forget them below.</p>}
+      {voices.length > 0 && (
       <ul className="flex flex-col divide-y divide-border rounded-md border border-border">
       {voices.map((v) => (
         <li key={v.name} className="flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]">
@@ -365,10 +364,13 @@ function Voices({ recognize }: { recognize: boolean }) {
         </li>
       ))}
       </ul>
+      )}
       <div className="flex items-center gap-2">
         {confirming ? (
           <>
-            <span className="text-[13px]">Forget all {voices.length} voices, and every meeting's voiceprints?</span>
+            <span className="text-[13px]">
+              {voices.length ? `Forget all ${voices.length} voices, and every meeting's voiceprints?` : "Delete every meeting's voiceprints?"}
+            </span>
             <Button size="sm" variant="destructive" onClick={() => void window.kasha.forgetAllVoices().then(() => (setConfirming(false), refresh()))}>
               Forget all
             </Button>

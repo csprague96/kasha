@@ -1,5 +1,5 @@
 import { Check, Pencil, Replace, X } from 'lucide-react'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { countMatches, findPattern } from '@shared/text'
 import { speakerName, type Meeting, type SpeakerId, type TranscriptSegment } from '@shared/types'
 import { clock, cn } from '@/lib/utils'
@@ -70,35 +70,71 @@ function SpeakerChip({ id, meeting }: { id: SpeakerId; meeting: Meeting }) {
   const name = speakerName(id, meeting.speakers)
   const given = meeting.speakers?.[id]?.trim() ?? ''
   const [value, setValue] = useState(given)
+  const [active, setActive] = useState(-1) // highlighted choice, for the keyboard
+  const listId = useId()
+  // One save per edit: Enter or a click closes the box, and a blur after that mustn't save again.
+  const saved = useRef(false)
   useEffect(() => setValue(given), [given])
+  useEffect(() => {
+    if (editing) saved.current = false
+  }, [editing])
 
-  const save = (v: string) => {
+  /**
+   * Saves a name. A guess is only confirmed (and its voice learned) by an
+   * explicit choice: picking the guessed name in the list, or the ✓ button.
+   * Leaving the box, or Enter, with the name unchanged is just a cancel.
+   */
+  const save = (v: string, picked = false) => {
+    if (saved.current) return
+    saved.current = true
     setEditing(false)
+    setActive(-1)
+    if (meeting.speakerGuesses?.[id] && v && v === given) {
+      if (picked) void window.kasha.updateMeeting(meeting.id, { confirmSpeaker: id })
+      return
+    }
     const next = { ...meeting.speakers }
     // Clearing the name, or typing the default, goes back to "Speaker 2".
     if (v && v !== speakerName(id)) next[id] = v
     else delete next[id]
-    // Picking the guessed name again is a yes to the guess.
-    if (meeting.speakerGuesses?.[id] && v && v === given) return void window.kasha.updateMeeting(meeting.id, { confirmSpeaker: id })
     if ((next[id] ?? '') !== (meeting.speakers?.[id] ?? '')) void window.kasha.updateMeeting(meeting.id, { speakers: next })
   }
   const commit = () => save(value.trim())
 
   if (editing) {
     const choices = nameChoices(id, meeting, value === given ? '' : value)
+    const optionId = (i: number) => `${listId}-${i}`
     return (
       <Popover open>
         <PopoverAnchor asChild>
           <input
             autoFocus
+            role="combobox"
+            aria-expanded={choices.length > 0}
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={active >= 0 && active < choices.length ? optionId(active) : undefined}
             value={value}
-            onChange={(e) => setValue(e.target.value)}
+            onChange={(e) => {
+              setValue(e.target.value)
+              setActive(-1)
+            }}
             onFocus={(e) => e.currentTarget.select()}
             onBlur={commit}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') e.currentTarget.blur()
-              if (e.key === 'Escape') {
+              if (e.key === 'ArrowDown' && choices.length) {
+                e.preventDefault()
+                setActive((i) => (i + 1) % choices.length)
+              } else if (e.key === 'ArrowUp' && choices.length) {
+                e.preventDefault()
+                setActive((i) => (i <= 0 ? choices.length - 1 : i - 1))
+              } else if (e.key === 'Enter') {
+                e.preventDefault()
+                if (active >= 0 && active < choices.length) save(choices[active].name, true)
+                else commit()
+              } else if (e.key === 'Escape') {
                 setValue(given)
+                setActive(-1)
                 setEditing(false)
               }
             }}
@@ -109,18 +145,24 @@ function SpeakerChip({ id, meeting }: { id: SpeakerId; meeting: Meeting }) {
         </PopoverAnchor>
         {choices.length > 0 && (
           <PopoverContent align="start" className="w-64 p-1" onOpenAutoFocus={(e) => e.preventDefault()}>
-            <ul aria-label="Choose a name">
-              {choices.map((c) => (
-                <li key={c.name}>
-                  <button
-                    // Keeps the typing box from saving first, on blur.
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => save(c.name)}
-                    className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-sidebar"
-                  >
-                    <span className="truncate">{c.name}</span>
-                    <span className="shrink-0 text-xs text-muted">{c.from}</span>
-                  </button>
+            <ul id={listId} role="listbox" aria-label="Choose a name">
+              {choices.map((c, i) => (
+                <li
+                  key={c.name}
+                  id={optionId(i)}
+                  role="option"
+                  aria-selected={i === active}
+                  // Keeps the typing box from saving first, on blur.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => save(c.name, true)}
+                  onMouseEnter={() => setActive(i)}
+                  className={cn(
+                    'flex w-full cursor-default items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[13px]',
+                    i === active && 'bg-sidebar'
+                  )}
+                >
+                  <span className="truncate">{c.name}</span>
+                  <span className="shrink-0 text-xs text-muted">{c.from}</span>
                 </li>
               ))}
             </ul>

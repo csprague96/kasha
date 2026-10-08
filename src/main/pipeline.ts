@@ -18,6 +18,8 @@ import { finalize, transcribe } from './transcriber'
 
 export interface PipelineEvents {
   changed(id: string): void
+  /** Settings changed here (the note taker's name, learned from Teams). */
+  settingsChanged(): void
   progress(id: string, p: number | null): void
   done(m: Meeting): void
 }
@@ -55,7 +57,8 @@ async function identify(
   transcript: TranscriptSegment[],
   tracks: Array<{ track: Track; file: string }>,
   set: Setter,
-  secs: () => number
+  secs: () => number,
+  onSettings: () => void
 ): Promise<TranscriptSegment[]> {
   let m = store.getMeeting(id)!
   const timeline = readRoster(id)
@@ -63,9 +66,11 @@ async function identify(
   // Who the Teams window showed (roster.ts).
   if (timeline.length && !m.participants?.length) {
     const self = selfName(timeline)
-    // How the note taker is named, if they haven't said: Teams knows.
-    if (self && !store.getSettings().myName.trim()) {
+    // How the note taker is named, if they haven't said: Teams knows. Only a
+    // full name, so a misread tile can't make a single word "you".
+    if (self && self.trim().split(/ +/).length >= 2 && !store.getSettings().myName.trim()) {
       store.setSettings({ myName: self })
+      onSettings()
       log('my-name-from-teams')
     }
     const myName = store.getSettings().myName
@@ -167,8 +172,11 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
     // quit stopped it part way (the meeting was left 'separating'), or on
     // Retry after a failure. Not on "Update summary": that would bring back
     // guesses the user turned down.
-    if (transcript.length && (fresh || wasStatus === 'separating' || wasStatus === 'failed') && !store.getMeeting(id)?.separated) {
-      transcript = await identify(id, transcript, tracks, set, secs)
+    const cur = store.getMeeting(id)
+    // Notes processed before this step existed: already split or named, so not again.
+    const before = !fresh && (transcript.some((s) => /^s\d+$/.test(s.speaker)) || Object.keys(cur?.speakers ?? {}).length > 0)
+    if (transcript.length && !cur?.separated && !before && (fresh || wasStatus === 'separating' || wasStatus === 'failed')) {
+      transcript = await identify(id, transcript, tracks, set, secs, () => ev.settingsChanged())
     }
 
     let meeting = store.getMeeting(id)!

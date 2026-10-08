@@ -116,11 +116,12 @@ export function pickEvent(events: CalendarEvent[], title: string, at: Date): Cal
     return !e.cancelled && start <= now + 15 * 60_000 && end > now
   })
   const sameTitle = live.filter((e) => e.subject && normName(e.subject) === normName(title))
-  // A meeting already under way beats one about to start: for an ad-hoc call,
-  // the next meeting's invite list would be the wrong people.
-  const started = live.filter((e) => parseTime(e.start, e.timeZone) <= now)
-  const pool = sameTitle.length ? sameTitle : started.length ? started : live
-  const current = pool.sort((a, b) => parseTime(b.start, b.timeZone) - parseTime(a.start, a.timeZone))[0]
+  // All-day and very long events (8 h or more) are blocks, not meetings, unless nothing else is on.
+  const span = (e: CalendarEvent) => parseTime(e.end, e.timeZone) - parseTime(e.start, e.timeZone)
+  const short = live.filter((e) => span(e) < 8 * 3600_000)
+  const pool = sameTitle.length ? sameTitle : short.length ? short : live
+  // The one whose start is closest to now: joining at 10:58 is the 11:00 meeting, not the 10:00 one.
+  const current = pool.sort((a, b) => Math.abs(parseTime(a.start, a.timeZone) - now) - Math.abs(parseTime(b.start, b.timeZone) - now))[0]
   if (current) return current
   // Nothing scheduled now: meetings run over, so take one that ended in the last half hour.
   const overran = events.filter((e) => {

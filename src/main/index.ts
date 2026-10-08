@@ -468,6 +468,7 @@ function stopRecording(): void {
 }
 
 const pipelineEvents: PipelineEvents = {
+  settingsChanged: () => broadcast('settings-changed', store.getSettings()),
   changed: () => {
     broadcast('meetings-changed')
     broadcast('actions-changed')
@@ -652,7 +653,10 @@ function registerIpc(): void {
     if (patch.speakers && typeof patch.speakers === 'object') {
       const names: NonNullable<Meeting['speakers']> = {}
       for (const [k, v] of Object.entries(patch.speakers)) {
-        if (isSpeakerId(k) && typeof v === 'string' && v.trim()) names[k] = v.trim().slice(0, 60)
+        if (!isSpeakerId(k) || typeof v !== 'string' || !v.trim()) continue
+        // A name the user didn't touch stays exactly as it was: trimming a long
+        // guess would look like a rename, and a rename learns the voice.
+        names[k] = v === before?.speakers?.[k] ? v : v.trim().slice(0, 60)
       }
       clean.speakers = names
       // The summary still uses the old names until it's rewritten.
@@ -684,6 +688,8 @@ function registerIpc(): void {
       clean.speakerGuesses = rest
       // Now it's confirmed, the voice is learned like any name the user gave.
       syncVoices(id, { ...before.speakers, [confirm]: undefined }, before.speakers)
+      // The summary called them "Speaker N (possibly …)".
+      if (hasSummary(id)) clean.summaryOutdated = true
     }
     const m = store.updateMeeting(id, clean)
     if (recording?.meetingId === id && clean.title) {
@@ -815,7 +821,9 @@ function registerIpc(): void {
 
   handle('settings:get', () => store.getSettings())
   handle('settings:set', (patch: Partial<Settings>) => {
+    const was = store.getSettings().speakers.recognize
     const s = store.setSettings(patch)
+    if (was && !s.speakers.recognize) forgetMeetingPrints()
     applyLoginItem()
     return s
   })
@@ -855,7 +863,7 @@ function registerIpc(): void {
   // Every learned voice, and every meeting's voiceprints.
   handle('voices:forgetAll', () => {
     voices.clear()
-    for (const m of store.listMeetings()) rmSync(join(store.paths.meeting(m.id), 'speakers.json'), { force: true })
+    forgetMeetingPrints()
     log('voices-forgotten')
   })
   handle('setup:pickFolder', async () => {
@@ -957,6 +965,19 @@ function registerIpc(): void {
   ipcMain.on('bar:openMain', () => recording && showMain({ meetingId: recording.meetingId }))
 }
 
+/** Deletes every meeting's voiceprints (speakers.json). Learned voices (voices.json) stay unless the user forgets them. */
+function forgetMeetingPrints(): void {
+  let failed = 0
+  for (const m of store.listMeetings()) {
+    try {
+      rmSync(join(store.paths.meeting(m.id), 'speakers.json'), { force: true })
+    } catch {
+      failed++
+    }
+  }
+  if (failed) log('voiceprints-not-deleted', { meetings: failed })
+}
+
 function applyLoginItem(): void {
   // Only the installed app registers itself; dev builds would register electron.exe.
   if (!app.isPackaged) return
@@ -1040,6 +1061,10 @@ app.whenReady().then(() => {
   }
 
   registerIpc()
+  // Voices learned from notes deleted before deleting took them along, and
+  // voiceprints left behind with recognition off.
+  voices.prune(new Set(store.listMeetings().map((m) => m.id)))
+  if (!store.getSettings().speakers.recognize) forgetMeetingPrints()
   applyLoginItem()
   updater.start()
   startAudioSweeper(() => broadcast('meetings-changed'))

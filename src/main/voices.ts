@@ -169,6 +169,15 @@ export function unenrollMeeting(meetingId: string): void {
   if (count(after) !== count(before)) save(after)
 }
 
+/** Forgets samples from meetings that no longer exist. */
+export function prune(meetingIds: Set<string>): void {
+  if (!existsSync(file())) return
+  const before = load()
+  const after = before.map((voice) => ({ ...voice, samples: voice.samples.filter((s) => meetingIds.has(s.meetingId)) })).filter((x) => x.samples.length)
+  const count = (vs: Voice[]) => vs.reduce((t, v) => t + v.samples.length, 0)
+  if (count(after) !== count(before)) save(after)
+}
+
 /** Forgets every learned voice. */
 export function clear(): void {
   if (existsSync(file())) save([])

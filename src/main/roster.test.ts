@@ -52,10 +52,15 @@ describe('people and addresses', () => {
     expect(resolveAttendees(['jb@co.com'], ['Jo Blake', 'Joe Bloggs'])).toEqual(['jb@co.com'])
   })
 
-  it('addressFits matches company address forms', () => {
-    expect(addressFits('slee@co.com', 'Sam Lee')).toBe(true)
+  it('addressFits only takes addresses that spell the whole name (for recording rules)', () => {
     expect(addressFits('sam.lee@co.com', 'Sam Lee')).toBe(true)
-    expect(addressFits('slee@co.com', 'Sam Long')).toBe(false)
+    expect(addressFits('samlee@co.com', 'Sam Lee')).toBe(true)
+    expect(addressFits('slee@co.com', 'Sam Lee')).toBe(false)
+    expect(addressFits('sam.long@co.com', 'Sam Lee')).toBe(false)
     expect(addressFits('Sam Lee', 'Sam Lee')).toBe(false)
+  })
+
+  it('an address that fits someone in the call isn’t taken as the note taker', () => {
+    expect(resolveAttendees(['slee@co.com'], ['Sara Lee'], { name: 'Sam Lee', as: 'Sam Lee' })).toEqual(['Sara Lee'])
   })
 })

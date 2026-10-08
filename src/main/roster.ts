@@ -345,7 +345,7 @@ export function selfName(timeline: RosterSnapshot[]): string | null {
 }
 
 /** The ways a company tends to build an address from a name: slee, sam.lee, samlee, sam_lee, sam, lees. */
-export function addressForms(name: string): string[] {
+export function addressForms(name: string, fullOnly = false): string[] {
   const words = normName(name)
     .replace(/[^\p{L}\s'-]/gu, ' ')
     .split(/\s+/)
@@ -354,7 +354,8 @@ export function addressForms(name: string): string[] {
   if (words.length < 2) return words
   const first = words[0]
   const last = words[words.length - 1]
-  return [first[0] + last, `${first}.${last}`, first + last, `${first}_${last}`, `${first}-${last}`, last + first[0], `${last}.${first}`]
+  const full = [`${first}.${last}`, first + last, `${first}_${last}`, `${first}-${last}`, `${last}.${first}`]
+  return fullOnly ? full : [first[0] + last, ...full, last + first[0]]
 }
 
 /**
@@ -364,10 +365,14 @@ export function addressForms(name: string): string[] {
  * `self`, the note taker's own address becomes their name (`self.as`), so the
  * Attendees tab ties it to "You" instead of listing it as not heard.
  */
-/** An invite entry that's only an address and fits this person's name ("slee@…" for Sam Lee). */
+/**
+ * An invite entry that's only an address and spells this person's whole name
+ * ("sam.lee@…" for Sam Lee). Initial forms ("slee@") are left out: for a rule
+ * that records without asking, Sara Lee's address mustn't count as Sam's.
+ */
 export function addressFits(entry: string, name: string): boolean {
   const m = /^([^@\s]+)@/.exec(entry.trim())
-  return !!m && addressForms(name).includes(m[1].toLowerCase())
+  return !!m && addressForms(name, true).includes(m[1].toLowerCase())
 }
 
 export function resolveAttendees(attendees: string[], people: string[], self?: { name: string; as: string }): string[] {
@@ -375,9 +380,12 @@ export function resolveAttendees(attendees: string[], people: string[], self?: {
     const m = /^([^@\s]+)@/.exec(a)
     if (!m) return a
     const local = m[1].toLowerCase()
-    if (self && addressForms(self.name).includes(local)) return self.as
+    // Someone in the call first; the note taker only when nobody else fits,
+    // so "slee@" for Sara Lee isn't taken as the note taker Sam Lee.
     const hits = people.filter((p) => addressForms(p).includes(local))
-    return hits.length === 1 ? hits[0] : a
+    if (hits.length === 1) return hits[0]
+    if (!hits.length && self && addressForms(self.name).includes(local)) return self.as
+    return a
   })
   return Array.from(new Set(out))
 }
