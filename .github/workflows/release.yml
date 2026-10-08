@@ -42,8 +42,18 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: Build and publish the installer
-        run: npm run build && npx electron-builder --win --publish ${{ steps.version.outputs.publish }}
+      - name: Build the installer
+        run: npm run build && npx electron-builder --win --publish never
+      # One release with every file. electron-builder's own publishing uploads
+      # files in parallel, and each upload created its own release when none
+      # existed yet: v0.2.1 came out as two releases, one with only the blockmap.
+      - name: Publish the release
+        if: steps.version.outputs.publish == 'always'
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.tag }}"
+          gh release create "$version" --title "${version#v}" --notes "Kasha ${version#v}" --latest \
+            dist/Kasha-Setup-*.exe dist/Kasha-Setup-*.exe.blockmap dist/latest.yml
         env:
           GH_TOKEN: ${{ github.token }}
       - uses: actions/upload-artifact@v5

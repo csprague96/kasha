@@ -119,7 +119,7 @@ export interface SeparateResult {
  * Splits "Others" into s1, s2… using the system-audio track, saves each voice's
  * embedding beside the transcript, and names voices heard in past meetings.
  */
-export async function separateSpeakers(meetingId: string, sysWav: string, transcript: TranscriptSegment[], expected?: number): Promise<SeparateResult> {
+export async function separateSpeakers(meetingId: string, sysWav: string, transcript: TranscriptSegment[], expected?: number, max?: number): Promise<SeparateResult> {
   const models = speakerPaths
   const spans = transcript.filter((s) => s.speaker === 'others').map((s) => ({ start: s.start, end: s.end }))
   if (!spans.length) return { transcript, names: {} }
@@ -129,7 +129,8 @@ export async function separateSpeakers(meetingId: string, sysWav: string, transc
     segmentationModel: models.segmentation(),
     embeddingModel: models.embedding(),
     threads: BATCH_THREADS,
-    expected
+    expected,
+    max
   })
   const assigned = assignLines(transcript, clusters)
 

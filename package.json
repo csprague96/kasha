@@ -1,7 +1,7 @@
 {
   "name": "kasha",
   "productName": "Kasha",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Meeting notes that record locally and sync to Obsidian.",
   "private": true,
   "main": "out/main/index.js",

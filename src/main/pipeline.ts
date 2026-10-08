@@ -8,7 +8,7 @@ import { exportOptions, syncToObsidian } from './obsidian'
 import type { Track } from './recorder'
 import { redact } from './redact'
 import { speakersReady } from './setup'
-import { namesFromRoster, participants, readRoster } from './roster'
+import { namesFromRoster, participants, readRoster, resolveAttendees } from './roster'
 import { separateSpeakers, syncVoices } from './speakers'
 import { whisperPrompt } from './speech'
 import * as store from './store'
@@ -73,7 +73,11 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
       // Who the Teams window showed in the call, if it was read (see roster.ts).
       const timeline = readRoster(id)
       const people = participants(timeline, store.getSettings().myName)
-      if (people.length) set({ participants: people })
+      if (people.length) {
+        // Invitees the calendar gave only as addresses get the names Teams showed.
+        const invited = store.getMeeting(id)?.attendees ?? []
+        set({ participants: people, ...(invited.length ? { attendees: resolveAttendees(invited, people) } : {}) })
+      }
       const sys = tracks.find((t) => t.track === 'sys')
       if (sys && store.getSettings().speakers.separate && speakersReady() && transcript.some((s) => s.speaker === 'others')) {
         set({ status: 'separating' })
@@ -81,7 +85,8 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
           // How many voices to expect: the people seen in the call, else the invite list less the note taker.
           const invited = store.getMeeting(id)?.attendees ?? []
           const expected = people.length ? Math.min(people.length, 8) : invited.length >= 2 ? Math.min(invited.length - 1, 8) : undefined
-          const r = await separateSpeakers(id, sys.file, transcript, expected)
+          // Teams' head count is also a ceiling: no more voices than people in the call.
+          const r = await separateSpeakers(id, sys.file, transcript, expected, people.length || undefined)
           transcript = r.transcript
           log('speakers', { found: new Set(transcript.filter((s) => s.speaker !== 'you').map((s) => s.speaker)).size, recognised: Object.keys(r.names).length, secs: secs() })
           store.writeTranscript(id, transcript)

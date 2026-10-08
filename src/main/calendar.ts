@@ -23,7 +23,13 @@ export interface CalendarEvent {
   timeZone: string | null
   recurring: boolean
   cancelled: boolean
-  attendees: string[]
+  /** Older replies were plain strings. */
+  attendees: Array<Attendee | string>
+}
+
+interface Attendee {
+  name: string | null
+  email: string | null
 }
 
 const SCHEMA = {
@@ -42,7 +48,15 @@ const SCHEMA = {
           timeZone: { type: ['string', 'null'] },
           recurring: { type: 'boolean' },
           cancelled: { type: 'boolean' },
-          attendees: { type: 'array', items: { type: 'string' } }
+          attendees: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { name: { type: ['string', 'null'] }, email: { type: ['string', 'null'] } },
+              required: ['name', 'email']
+            }
+          }
         },
         required: ['subject', 'start', 'end', 'timeZone', 'recurring', 'cancelled', 'attendees']
       }
@@ -54,15 +68,15 @@ const SCHEMA = {
 const READ = 'mcp__claude_ai_Microsoft_365__read_resource'
 
 const SYSTEM = `You look up events in the user's Outlook calendar and reply with JSON only:
-{"events": [{"subject": string|null, "start": string, "end": string, "timeZone": string|null, "recurring": boolean, "cancelled": boolean, "attendees": string[]}]}
+{"events": [{"subject": string|null, "start": string, "end": string, "timeZone": string|null, "recurring": boolean, "cancelled": boolean, "attendees": [{"name": string|null, "email": string|null}]}]}
 Steps:
-1. Search with the calendar search tool, using exactly the arguments given.
+1. Search with the calendar search tool, using exactly the arguments given. The calendar tools can take a few seconds to connect: if ToolSearch doesn't find them, search for them again. Only ever call tools for real; never write a tool call out as text, and never answer without having searched.
 2. For each event the user gives a time window for, read its full details with read_resource on the event's URI. Search results don't list everyone invited; the full details do.
 3. Reply with those events only.
 Fields:
 - start and end: the dateTime values exactly as the tools return them; timeZone: the timeZone given with them.
 - recurring: true if the event is an occurrence of a recurring series. cancelled: true if it's cancelled.
-- attendees: everyone invited, including the organizer, from the full details: the display name when there is one, otherwise the email address.
+- attendees: everyone invited, including the organizer, from the full details. name: the person's display name exactly as the details give it (null if there is none); email: their address.
 Find tools with ToolSearch. Use only the calendar search and read_resource tools. Never look people up. Don't explain.`
 
 const p2 = (n: number) => String(n).padStart(2, '0')
@@ -114,16 +128,17 @@ export function pickEvent(events: CalendarEvent[], title: string, at: Date): Cal
 }
 
 /**
- * A person's name from how the invite lists them. Only the name is kept: an
- * email address like "sam.lee@…" becomes "Sam Lee", and one that doesn't look
- * like a name (a room, a shared mailbox) is dropped.
+ * A person's name from how the invite lists them: an address like
+ * "sam.lee@…" becomes "Sam Lee". An address that doesn't spell a name
+ * ("slee@…") is kept as it is, lower-cased; after a Teams call it's swapped
+ * for the matching name from the meeting window (see roster.ts).
  */
 export function nameOf(entry: string): string {
   const named = entry.replace(/\s*<[^>]*>\s*$/, '').trim()
   if (named && !named.includes('@')) return named
   const local = named.split('@')[0]
   const parts = local.split(/[._-]+/).filter((p) => /^[a-z]{2,}$/i.test(p))
-  if (parts.length < 2 || parts.length > 3) return ''
+  if (parts.length < 2 || parts.length > 3) return /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(named) ? named.toLowerCase() : ''
   return parts.map((p) => p[0].toUpperCase() + p.slice(1).toLowerCase()).join(' ')
 }
 
@@ -146,18 +161,44 @@ export async function fetchEvents(at = new Date()): Promise<CalendarEvent[] | nu
     '--system-prompt', SYSTEM
   ]
   if (!exe.endsWith('.cmd')) args.push('--json-schema', JSON.stringify(SCHEMA))
-  try {
-    const { stdout } = await run(exe, args, prompt(at), emptyDir('kasha-claude'), 120_000)
-    const envelope = JSON.parse(stdout)
-    if (envelope.is_error) return null
-    const r = (envelope.structured_output ??
-      JSON.parse(String(envelope.result ?? '').replace(/^```(?:json)?\s*|\s*```$/g, ''))) as { events?: CalendarEvent[] }
-    return Array.isArray(r?.events) ? r.events : []
-  } catch (e) {
-    console.error('calendar:', (e as Error).message)
-    log('calendar-failed', { error: (e as Error).message.slice(0, 200) })
-    return null
+  // Each run is a fresh Claude Code, whose claude.ai connectors connect a few
+  // seconds after it starts. A model that answers before then never really
+  // searched: it writes tool calls out as text and returns nothing. A real
+  // lookup takes at least three turns (find the tool, search, read), so a
+  // shorter one is tried again.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const { stdout } = await run(exe, args, prompt(at), emptyDir('kasha-claude'), 120_000)
+      const envelope = JSON.parse(stdout)
+      if (envelope.is_error) return null
+      if (typeof envelope.num_turns === 'number' && envelope.num_turns < 3) {
+        log('calendar-retry', { attempt, turns: envelope.num_turns })
+        await new Promise((r) => setTimeout(r, 4000))
+        continue
+      }
+      const r = (envelope.structured_output ??
+        JSON.parse(String(envelope.result ?? '').replace(/^```(?:json)?\s*|\s*```$/g, ''))) as { events?: CalendarEvent[] }
+      return Array.isArray(r?.events) ? r.events : []
+    } catch (e) {
+      console.error('calendar:', (e as Error).message)
+      log('calendar-failed', { error: (e as Error).message.slice(0, 200) })
+      return null
+    }
   }
+  return null
+}
+
+/**
+ * The display name; else one worked out from the address. Addresses like
+ * cbalino@ give no name, which is why the display name is asked for: with
+ * addresses alone every attendee was dropped.
+ */
+function attendeeName(a: Attendee | string | null): string {
+  if (typeof a === 'string') return nameOf(a.trim())
+  if (!a || typeof a !== 'object') return ''
+  const name = typeof a.name === 'string' ? a.name.trim() : ''
+  if (name && !name.includes('@')) return name
+  return nameOf((typeof a.email === 'string' ? a.email : name).trim())
 }
 
 export async function lookupMeeting(title: string, at = new Date()): Promise<CalendarMatch | null> {
@@ -169,8 +210,8 @@ export async function lookupMeeting(title: string, at = new Date()): Promise<Cal
   const attendees = Array.from(
     new Set(
       (Array.isArray(event.attendees) ? event.attendees : [])
-        .filter((a): a is string => typeof a === 'string')
-        .map((a) => nameOf(a.trim()).slice(0, 80))
+        .map(attendeeName)
+        .map((a) => a.slice(0, 80))
         .filter(Boolean)
     )
   ).slice(0, 60)
