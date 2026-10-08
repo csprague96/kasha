@@ -1,7 +1,7 @@
 import { utilityProcess } from 'electron'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { constants, setPriority } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { Meeting, SpeakerId, TranscriptSegment } from '@shared/types'
 import { speakerPaths } from './setup'
 import type { SpeakerCluster, SpeakerRequest, SpeakerResponse } from './speakers-worker'
@@ -20,12 +20,26 @@ const MIN_SECONDS = 8
 
 const embeddingsFile = (meetingId: string) => join(store.paths.meeting(meetingId), 'speakers.json')
 
-/** Voice embeddings for this meeting's speakers, kept so renaming one teaches Kasha the voice. */
-export function readEmbeddings(meetingId: string): Partial<Record<SpeakerId, number[]>> {
+/** A meeting's voiceprints (speakers.json), kept so naming a speaker can teach Kasha the voice. */
+export interface SpeakerPrints {
+  model: string
+  voices: Partial<Record<SpeakerId, { v: number[]; capped?: boolean }>>
+}
+
+export function readEmbeddings(meetingId: string): SpeakerPrints {
   try {
-    return JSON.parse(readFileSync(embeddingsFile(meetingId), 'utf8')) as Partial<Record<SpeakerId, number[]>>
+    const raw = JSON.parse(readFileSync(embeddingsFile(meetingId), 'utf8')) as SpeakerPrints | Partial<Record<SpeakerId, number[]>>
+    if (raw && typeof raw === 'object' && 'voices' in raw && typeof raw.model === 'string') return raw as SpeakerPrints
+    // Before 0.2.3: { id: vector }, with no model recorded. The length tells CAM++ (512) from ERes2Net (192).
+    const out: SpeakerPrints = { model: 'unknown', voices: {} }
+    for (const [id, v] of Object.entries(raw as Record<string, number[]>)) {
+      if (!Array.isArray(v)) continue
+      out.voices[id as SpeakerId] = { v }
+      if (out.model === 'unknown') out.model = v.length === 192 ? voiceModel() : 'old'
+    }
+    return out
   } catch {
-    return {}
+    return { model: 'unknown', voices: {} }
   }
 }
 
@@ -58,15 +72,28 @@ function runWorker(req: SpeakerRequest): Promise<SpeakerCluster[]> {
 
 const overlap = (a: { start: number; end: number }, b: { start: number; end: number }) => Math.max(0, Math.min(a.end, b.end) - Math.max(a.start, b.start))
 
-/** Gives each "Others" line to the cluster it overlaps most. Lines with no overlap follow their neighbours. */
-export function assignLines(transcript: TranscriptSegment[], clusters: SpeakerCluster[]): { transcript: TranscriptSegment[]; ids: SpeakerId[] } {
-  if (clusters.length < 2) return { transcript, ids: clusters.length ? ['others'] : [] }
+/**
+ * Gives each "Others" line to the cluster it overlaps most. Lines with no
+ * overlap follow their neighbours. `clusterOf` says which cluster each
+ * speaker id came from, for keeping the right voiceprint.
+ */
+export function assignLines(
+  transcript: TranscriptSegment[],
+  clusters: SpeakerCluster[]
+): { transcript: TranscriptSegment[]; ids: SpeakerId[]; clusterOf: Map<SpeakerId, number> } {
+  if (clusters.length < 2) {
+    return { transcript, ids: clusters.length ? ['others'] : [], clusterOf: new Map(clusters.length ? [['others', 0]] : []) }
+  }
   const idOf = new Map<number, SpeakerId>()
   const ids: SpeakerId[] = []
   let last: number | null = null
   let prev: TranscriptSegment | null = null
   const out = transcript.map((seg) => {
-    if (seg.speaker !== 'others') return seg
+    if (seg.speaker !== 'others') {
+      // A reply from the note taker in between: what follows isn't a continuation.
+      if (seg.speaker === 'you') prev = null
+      return seg
+    }
     // The rest of an unfinished sentence ("…you know" / "in a moment.") stays
     // with whoever started it. These pieces are often too short to tell a
     // voice by, so overlap alone can hand them to someone else.
@@ -106,87 +133,91 @@ export function assignLines(transcript: TranscriptSegment[], clusters: SpeakerCl
     }
     return { ...seg, speaker: id }
   })
-  return { transcript: out, ids }
+  return { transcript: out, ids, clusterOf: new Map([...idOf].map(([k, id]) => [id, k])) }
 }
 
 export interface SeparateResult {
   transcript: TranscriptSegment[]
-  /** Names recognised from past meetings, by speaker id. */
-  names: Partial<Record<SpeakerId, string>>
+  /** Voices that sound like someone named in a past meeting: offered as guesses, by speaker id. */
+  matches: Partial<Record<SpeakerId, { name: string; score: number }>>
+  /** Voices joined only to fit the Teams head count (they may be two people). */
+  capped: SpeakerId[]
 }
 
+/** The voiceprint model in use, recorded with every voiceprint so prints from different models are never compared. */
+export const voiceModel = () => basename(speakerPaths.embedding()).replace(/\.onnx$/i, '')
+
 /**
- * Splits "Others" into s1, s2… using the system-audio track, saves each voice's
- * embedding beside the transcript, and names voices heard in past meetings.
+ * Splits "Others" into s1, s2… using the system-audio track and finds voices
+ * heard in past meetings. With recognition on, each voice's voiceprint is
+ * kept beside the transcript (speakers.json), so naming a speaker later can
+ * teach Kasha the voice; with it off, nothing is kept.
+ *
+ * `expected` (from the invite) makes grouping finer when too few voices come
+ * out; `max` (people seen in the Teams call) joins extra voices that sound
+ * alike. `candidates` limits recognition to the people in the call or invited.
  */
-export async function separateSpeakers(meetingId: string, sysWav: string, transcript: TranscriptSegment[], expected?: number, max?: number): Promise<SeparateResult> {
-  const models = speakerPaths
+export async function separateSpeakers(
+  meetingId: string,
+  sysWav: string,
+  transcript: TranscriptSegment[],
+  opts: { expected?: number; max?: number; candidates?: string[] } = {}
+): Promise<SeparateResult> {
   const spans = transcript.filter((s) => s.speaker === 'others').map((s) => ({ start: s.start, end: s.end }))
-  if (!spans.length) return { transcript, names: {} }
+  if (!spans.length) return { transcript, matches: {}, capped: [] }
   const clusters = await runWorker({
     wav: sysWav,
     spans,
-    segmentationModel: models.segmentation(),
-    embeddingModel: models.embedding(),
+    segmentationModel: speakerPaths.segmentation(),
+    embeddingModel: speakerPaths.embedding(),
     threads: BATCH_THREADS,
-    expected,
-    max
+    expected: opts.expected,
+    max: opts.max
   })
   const assigned = assignLines(transcript, clusters)
-
-  // Which cluster became which id: in order of first appearance, the same way assignLines numbers them.
-  const embeddings: Partial<Record<SpeakerId, number[]>> = {}
-  const names: SeparateResult['names'] = {}
-  if (clusters.length === 1) {
-    embeddings.others = clusters[0].embedding
-  } else if (clusters.length > 1) {
-    const firstLine = (id: SpeakerId) => assigned.transcript.find((s) => s.speaker === id)
-    for (const id of assigned.ids) {
-      const line = firstLine(id)
-      if (!line) continue
-      let k = 0
-      let best = -1
-      clusters.forEach((c, i) => {
-        const o = c.segments.reduce((t, s) => t + overlap(line, s), 0)
-        if (o > best) {
-          best = o
-          k = i
-        }
-      })
-      embeddings[id] = clusters[k].embedding
-    }
-  }
   const seconds = (id: SpeakerId) => assigned.transcript.filter((s) => s.speaker === id).reduce((t, s) => t + s.end - s.start, 0)
-  for (const id of Object.keys(embeddings) as SpeakerId[]) {
-    if (seconds(id) < MIN_SECONDS) delete embeddings[id]
+  const prints: SpeakerPrints['voices'] = {}
+  const capped: SpeakerId[] = []
+  for (const [id, k] of assigned.clusterOf) {
+    const c = clusters[k]
+    if (!c) continue
+    if (c.capped) capped.push(id)
+    // Too little speech to tell a voice by, to name or to learn.
+    if (seconds(id) >= MIN_SECONDS) prints[id] = { v: c.embedding, ...(c.capped ? { capped: true } : {}) }
   }
-  writeFileSync(embeddingsFile(meetingId), JSON.stringify(embeddings))
 
-  if (store.getSettings().speakers.recognize) {
-    const taken = new Set<string>()
-    for (const [id, v] of Object.entries(embeddings) as Array<[SpeakerId, number[]]>) {
-      const hit = voices.match(v)
-      if (hit && !taken.has(hit.name.toLowerCase())) {
-        names[id] = hit.name
-        taken.add(hit.name.toLowerCase())
-      }
-    }
-  }
-  return { transcript: assigned.transcript, names }
+  const settings = store.getSettings()
+  if (!settings.speakers.recognize) return { transcript: assigned.transcript, matches: {}, capped }
+  const model = voiceModel()
+  writeFileSync(embeddingsFile(meetingId), JSON.stringify({ model, voices: prints } satisfies SpeakerPrints))
+  // A mixed voice (capped) could match either person, so it's never matched.
+  const usable = Object.fromEntries(Object.entries(prints).filter(([, p]) => p && !p.capped).map(([id, p]) => [id, p!.v]))
+  const matches = voices.matchAll(usable, model, opts.candidates)
+  return { transcript: assigned.transcript, matches, capped }
 }
 
 /**
- * After the user renames speakers: learn voices that were given a name, and
- * forget what a removed or changed name taught.
+ * After the user names, renames or confirms speakers: learn the voices given
+ * a name, and forget what a removed or changed name taught. Voices joined
+ * only to fit the head count, and voiceprints from another model, are never
+ * learned. Forgetting works even with recognition off.
  */
 export function syncVoices(meetingId: string, before: Meeting['speakers'], after: Meeting['speakers']): void {
-  if (!store.getSettings().speakers.recognize || !existsSync(embeddingsFile(meetingId))) return
-  const embeddings = readEmbeddings(meetingId)
-  for (const [id, v] of Object.entries(embeddings) as Array<[SpeakerId, number[]]>) {
-    if (id === 'you') continue
+  if (!existsSync(embeddingsFile(meetingId))) return
+  const { model, voices: prints } = readEmbeddings(meetingId)
+  const learn = store.getSettings().speakers.recognize && model === voiceModel()
+  for (const [id, p] of Object.entries(prints) as Array<[SpeakerId, { v: number[]; capped?: boolean }]>) {
+    if (id === 'you' || !p) continue
     const was = before?.[id]?.trim() ?? ''
     const now = after?.[id]?.trim() ?? ''
-    if (now && now !== was) voices.enroll(now, { meetingId, speaker: id, v })
-    else if (!now && was) voices.unenroll(meetingId, id)
+    if (now === was) continue
+    if (now && learn && !p.capped) voices.enroll(now, { meetingId, speaker: id, v: p.v, model })
+    else if (was) voices.unenroll(meetingId, id)
   }
+}
+
+/** Forgets a meeting's voiceprints and whatever was learned from them. */
+export function forgetMeetingVoices(meetingId: string): void {
+  voices.unenrollMeeting(meetingId)
+  rmSync(embeddingsFile(meetingId), { force: true })
 }

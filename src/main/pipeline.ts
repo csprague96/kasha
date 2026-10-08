@@ -1,15 +1,15 @@
 import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { applyVocabulary } from '@shared/text'
-import { GENERIC_TITLE, type Meeting } from '@shared/types'
+import { GENERIC_TITLE, type Meeting, type SpeakerId, type TranscriptSegment } from '@shared/types'
 import { takeLive } from './live'
 import { log } from './log'
 import { exportOptions, syncToObsidian } from './obsidian'
 import type { Track } from './recorder'
 import { redact } from './redact'
 import { speakersReady } from './setup'
-import { namesFromRoster, participants, readRoster, resolveAttendees } from './roster'
-import { separateSpeakers, syncVoices } from './speakers'
+import { namesFromRoster, participants, readRoster, resolveAttendees, selfName } from './roster'
+import { separateSpeakers, type SeparateResult } from './speakers'
 import { whisperPrompt } from './speech'
 import * as store from './store'
 import { carryChecks, speakerGuesses, splitNote, summarize, summaryMarkdown } from './summarizer'
@@ -41,6 +41,95 @@ function audioTracks(id: string): Array<{ track: Track; file: string }> {
     .filter((t) => existsSync(t.file))
 }
 
+type Setter = (patch: Partial<Meeting>) => Meeting
+
+/**
+ * Works out who's who: who Teams showed in the call, the voices on the
+ * computer's audio told apart, and names for them. Every name found here is a
+ * guess ("Name?") the user confirms with one click; a voice is only learned
+ * once they do. The order is: names the user gave, then Teams, then voices
+ * that sound like someone named before (only people in the call or invited).
+ */
+async function identify(
+  id: string,
+  transcript: TranscriptSegment[],
+  tracks: Array<{ track: Track; file: string }>,
+  set: Setter,
+  secs: () => number
+): Promise<TranscriptSegment[]> {
+  let m = store.getMeeting(id)!
+  const timeline = readRoster(id)
+
+  // Who the Teams window showed (roster.ts).
+  if (timeline.length && !m.participants?.length) {
+    const self = selfName(timeline)
+    // How the note taker is named, if they haven't said: Teams knows.
+    if (self && !store.getSettings().myName.trim()) {
+      store.setSettings({ myName: self })
+      log('my-name-from-teams')
+    }
+    const myName = store.getSettings().myName
+    const people = participants(timeline, myName)
+    if (people.length) {
+      // Invitees the calendar gave only as addresses get the names Teams showed.
+      const invited = m.attendees ?? []
+      const me = self ? { name: self, as: myName.trim() || self } : undefined
+      m = set({ participants: people, ...(invited.length ? { attendees: resolveAttendees(invited, people, me) } : {}) })
+    }
+  }
+  const people = m.participants ?? []
+
+  // Tell the people on the computer's audio apart, unless that's done already.
+  const sys = tracks.find((t) => t.track === 'sys')
+  const split = transcript.some((s) => /^s\d+$/.test(s.speaker))
+  let matches: SeparateResult['matches'] = {}
+  if (sys && !split && !m.speakers?.others && store.getSettings().speakers.separate && speakersReady() && transcript.some((s) => s.speaker === 'others')) {
+    set({ status: 'separating' })
+    try {
+      // The invite (less the note taker) says how many voices to look for;
+      // Teams says how many people there were at most. Everyone invited or
+      // seen is who a known voice may be.
+      const invited = m.attendees ?? []
+      const r = await separateSpeakers(id, sys.file, transcript, {
+        expected: invited.length >= 2 ? Math.min(invited.length - 1, 8) : undefined,
+        max: people.length || undefined,
+        candidates: people.length || invited.length ? [...people, ...invited] : undefined
+      })
+      transcript = r.transcript
+      matches = r.matches
+      store.writeTranscript(id, transcript)
+      const talk = new Map<string, number>()
+      for (const s of transcript) if (s.speaker !== 'you') talk.set(s.speaker, (talk.get(s.speaker) ?? 0) + s.end - s.start)
+      log('speakers', {
+        found: talk.size,
+        substantial: [...talk.values()].filter((t) => t >= 20).length,
+        inCall: people.length || undefined,
+        capped: r.capped.length || undefined,
+        matched: Object.keys(matches).length,
+        secs: secs()
+      })
+    } catch (e) {
+      // Not worth failing the meeting over: everyone stays "Others".
+      console.error('speakers:', (e as Error).message)
+      log('speakers-failed', { error: (e as Error).message.slice(0, 200) })
+    }
+  }
+
+  // Names to confirm, from Teams first, then from known voices.
+  m = store.getMeeting(id)!
+  const fromTeams = timeline.length ? namesFromRoster(timeline, transcript, m.speakers, store.getSettings().myName) : { guesses: {}, guessNames: {} }
+  const guessNames: NonNullable<Meeting['speakers']> = { ...fromTeams.guessNames }
+  const guesses: NonNullable<Meeting['speakerGuesses']> = { ...fromTeams.guesses }
+  for (const [sid, hit] of Object.entries(matches) as Array<[SpeakerId, { name: string; score: number }]>) {
+    if (m.speakers?.[sid]?.trim() || guessNames[sid]) continue
+    guessNames[sid] = hit.name
+    guesses[sid] = { evidence: `Sounds like ${hit.name} from an earlier meeting (voice match ${hit.score.toFixed(2)}).` }
+  }
+  log('named', { fromTeams: Object.keys(fromTeams.guesses).length, fromVoices: Object.keys(guesses).length - Object.keys(fromTeams.guesses).length })
+  set({ speakers: { ...guessNames, ...m.speakers }, speakerGuesses: { ...m.speakerGuesses, ...guesses }, separated: true })
+  return transcript
+}
+
 async function run(id: string, ev: PipelineEvents): Promise<void> {
   const t0 = Date.now()
   const secs = () => Math.round((Date.now() - t0) / 1000)
@@ -50,11 +139,13 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
     return m
   }
   const live = takeLive(id)
+  const wasStatus = store.getMeeting(id)?.status
   try {
     let transcript = store.readTranscript(id)
     const tracks = audioTracks(id)
+    const fresh = transcript.length === 0 && tracks.length > 0
 
-    if (transcript.length === 0 && tracks.length > 0) {
+    if (fresh) {
       set({ status: 'transcribing', error: undefined })
       ev.progress(id, 0)
       const progress = (p: number) => ev.progress(id, p)
@@ -68,50 +159,16 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
       store.writeTranscript(id, transcript)
       ev.progress(id, null)
       log('transcribed', { lines: transcript.length, fromLive: !!fromLive, secs: secs() })
-
-      // Tell the people on the computer's audio apart, and name voices known from past meetings.
-      // Who the Teams window showed in the call, if it was read (see roster.ts).
-      const timeline = readRoster(id)
-      const people = participants(timeline, store.getSettings().myName)
-      if (people.length) {
-        // Invitees the calendar gave only as addresses get the names Teams showed.
-        const invited = store.getMeeting(id)?.attendees ?? []
-        set({ participants: people, ...(invited.length ? { attendees: resolveAttendees(invited, people) } : {}) })
-      }
-      const sys = tracks.find((t) => t.track === 'sys')
-      if (sys && store.getSettings().speakers.separate && speakersReady() && transcript.some((s) => s.speaker === 'others')) {
-        set({ status: 'separating' })
-        try {
-          // How many voices to expect: the people seen in the call, else the invite list less the note taker.
-          const invited = store.getMeeting(id)?.attendees ?? []
-          const expected = people.length ? Math.min(people.length, 8) : invited.length >= 2 ? Math.min(invited.length - 1, 8) : undefined
-          // Teams' head count is also a ceiling: no more voices than people in the call.
-          const r = await separateSpeakers(id, sys.file, transcript, expected, people.length || undefined)
-          transcript = r.transcript
-          log('speakers', { found: new Set(transcript.filter((s) => s.speaker !== 'you').map((s) => s.speaker)).size, recognised: Object.keys(r.names).length, secs: secs() })
-          store.writeTranscript(id, transcript)
-          const m = store.getMeeting(id)!
-          set({ speakers: { ...r.names, ...m.speakers } })
-        } catch (e) {
-          // Not worth failing the meeting over: everyone stays "Others".
-          console.error('speakers:', (e as Error).message)
-          log('speakers-failed', { error: (e as Error).message.slice(0, 200) })
-        }
-      }
-
-      // Name the voices from the Teams timeline: outright for a one-to-one
-      // call, as guesses to confirm otherwise. Names already given win.
-      if (timeline.length) {
-        const m = store.getMeeting(id)!
-        const r = namesFromRoster(timeline, transcript, m.speakers, store.getSettings().myName)
-        log('teams-named', { people: people.length, named: Object.keys(r.names).length, guessed: Object.keys(r.guesses).length })
-        const speakers = { ...r.guessNames, ...r.names, ...m.speakers }
-        set({ speakers, speakerGuesses: { ...m.speakerGuesses, ...r.guesses } })
-        // Certain names teach Kasha the voice, like a name the user gave. Guesses wait for a yes.
-        if (Object.keys(r.names).length) syncVoices(id, m.speakers, { ...m.speakers, ...r.names })
-      }
     } else {
       live?.stop()
+    }
+
+    // Who's who, once per meeting: after transcribing, or when a crash or
+    // quit stopped it part way (the meeting was left 'separating'), or on
+    // Retry after a failure. Not on "Update summary": that would bring back
+    // guesses the user turned down.
+    if (transcript.length && (fresh || wasStatus === 'separating' || wasStatus === 'failed') && !store.getMeeting(id)?.separated) {
+      transcript = await identify(id, transcript, tracks, set, secs)
     }
 
     let meeting = store.getMeeting(id)!
@@ -124,6 +181,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
           meetingDate: new Date(meeting.recordingStartedAt ?? meeting.createdAt),
           myName: store.getSettings().myName,
           speakers: meeting.speakers,
+          guessed: Object.keys(meeting.speakerGuesses ?? {}) as SpeakerId[],
           attendees: meeting.attendees,
           participants: meeting.participants
         },
@@ -140,6 +198,15 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
       // Names worked out from the conversation are shown as guesses until confirmed.
       // They aren't learned as voices until then.
       const { names, guesses } = speakerGuesses(s, transcript, meeting.speakers)
+      // The summary may give only a first name. When exactly one person in the
+      // call or invite has it, offer their full name (Kasha's own list, not the model's).
+      const known = [...(meeting.participants ?? []), ...(meeting.attendees ?? [])].filter((n) => !n.includes('@'))
+      for (const [sid, n] of Object.entries(names) as Array<[SpeakerId, string]>) {
+        if (!n || /\s/.test(n.trim())) continue
+        const first = n.trim().toLowerCase()
+        const full = [...new Set(known.filter((k) => k.trim().toLowerCase().split(/\s+/)[0] === first))]
+        if (full.length === 1) names[sid] = full[0]
+      }
       log('summarized', { engine: s.engine, guessedNames: Object.keys(guesses).length, secs: secs() })
       set({
         speakers: { ...meeting.speakers, ...names },

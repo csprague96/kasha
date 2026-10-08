@@ -1,13 +1,13 @@
 import { copyFileSync, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, join } from 'node:path'
 import { attendance, attendanceSummary } from '@shared/attendance'
-import { APP_LABELS, speakerName, type Meeting, type Settings, type TranscriptSegment } from '@shared/types'
+import { APP_LABELS, shownName, type Meeting, type Settings, type TranscriptSegment } from '@shared/types'
 import { paths } from './store'
 
 /** The Obsidian settings plus the standing tags every note gets. */
-export type ExportOptions = Settings['obsidian'] & { defaultTags?: string[] }
+export type ExportOptions = Settings['obsidian'] & { defaultTags?: string[]; myName?: string }
 
-export const exportOptions = (s: Settings): ExportOptions => ({ ...s.obsidian, defaultTags: s.tags.defaults })
+export const exportOptions = (s: Settings): ExportOptions => ({ ...s.obsidian, defaultTags: s.tags.defaults, myName: s.myName })
 
 const p2 = (n: number) => String(n).padStart(2, '0')
 
@@ -54,7 +54,7 @@ export function buildMarkdown(
     const mins = Math.round((Date.parse(m.recordingEndedAt) - Date.parse(m.recordingStartedAt)) / 60000)
     fm.push(`duration: ${mins}m`)
   }
-  const who = attendanceSummary(attendance(m, transcript, ''))
+  const who = attendanceSummary(attendance(m, transcript, opts.myName ?? ''))
   if (who.present.length) fm.push(`attendees: [${who.present.map(yamlString).join(', ')}]`)
   if (who.absent.length) fm.push(`not_heard: [${who.absent.map(yamlString).join(', ')}]`)
   // The standing tags from Settings go first, then the note's own.
@@ -69,7 +69,7 @@ export function buildMarkdown(
 
   const out = fm.join('\n') + body.trim() + '\n'
   if (!opts.includeTranscript || transcript.length === 0) return out
-  const lines = transcript.map((t) => `> \`${clock(t.start)}\` **${speakerName(t.speaker, m.speakers)}:** ${t.text}`)
+  const lines = transcript.map((t) => `> \`${clock(t.start)}\` **${shownName(t.speaker, m)}:** ${t.text}`)
   return `${out}\n> [!quote]- Transcript\n${lines.join('\n>\n')}\n`
 }
 

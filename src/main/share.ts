@@ -5,7 +5,7 @@ import { basename, dirname, extname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Marked } from 'marked'
 import { attendance, attendanceSummary } from '@shared/attendance'
-import { APP_LABELS, speakerName, type Meeting, type ShareOptions, type TranscriptSegment } from '@shared/types'
+import { APP_LABELS, shownName, type Meeting, type ShareOptions, type TranscriptSegment } from '@shared/types'
 import { exportFileName } from './obsidian'
 import * as store from './store'
 
@@ -44,7 +44,7 @@ export function shareMarkdown(m: Meeting, note: string, transcript: TranscriptSe
   }
   if (opts.transcript && transcript.length) {
     out.push('## Transcript', '')
-    for (const t of transcript) out.push(`\`${clock(t.start)}\` **${speakerName(t.speaker, m.speakers)}:** ${t.text}`, '')
+    for (const t of transcript) out.push(`\`${clock(t.start)}\` **${shownName(t.speaker, m)}:** ${t.text}`, '')
   }
   return out.join('\n').trim() + '\n'
 }

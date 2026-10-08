@@ -328,17 +328,25 @@ function CalendarCheck() {
 }
 
 /** People whose voices Kasha has learned. Removing one forgets the voice; the notes keep their names. */
-function Voices() {
+/** Learned voices, each forgettable. Shown even with recognition off, so stored voices can always be deleted. */
+function Voices({ recognize }: { recognize: boolean }) {
   const [voices, setVoices] = useState<VoiceProfile[] | null>(null)
+  const [confirming, setConfirming] = useState(false)
   const refresh = () => void window.kasha.listVoices().then(setVoices)
   useEffect(() => {
     refresh()
     return window.kasha.onMeetingsChanged(refresh)
   }, [])
   if (!voices) return null
-  if (!voices.length) return <p className="text-[13px] text-muted">No voices learned yet. Name a speaker in a transcript and Kasha will recognise them next time.</p>
+  if (!voices.length) {
+    return recognize ? (
+      <p className="text-[13px] text-muted">No voices learned yet. When you name or confirm a speaker in a transcript, Kasha learns the voice and offers the name next time.</p>
+    ) : null
+  }
   return (
-    <ul className="flex flex-col divide-y divide-border rounded-md border border-border">
+    <div className="flex flex-col gap-2">
+      {!recognize && <p className="text-[13px] text-muted">Recognition is off, but these voices are still stored. Forget them below.</p>}
+      <ul className="flex flex-col divide-y divide-border rounded-md border border-border">
       {voices.map((v) => (
         <li key={v.name} className="flex items-center justify-between gap-3 px-3 py-1.5 text-[13px]">
           <span className="truncate">{v.name}</span>
@@ -356,7 +364,25 @@ function Voices() {
           </Button>
         </li>
       ))}
-    </ul>
+      </ul>
+      <div className="flex items-center gap-2">
+        {confirming ? (
+          <>
+            <span className="text-[13px]">Forget all {voices.length} voices, and every meeting's voiceprints?</span>
+            <Button size="sm" variant="destructive" onClick={() => void window.kasha.forgetAllVoices().then(() => (setConfirming(false), refresh()))}>
+              Forget all
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+            Forget all voices
+          </Button>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -619,14 +645,14 @@ export function Settings({ settings, onChange, page, onPage }: Props & { page: S
         />
         <Toggle
           label="Recognise people from past meetings"
-          hint="When you name a speaker, Kasha remembers the voice and uses the name next time. Voices stay on this PC."
+          hint="When you name or confirm a speaker, Kasha keeps a voiceprint (numbers, not audio) and offers that name, as a guess to confirm, when the voice is heard again. Voiceprints are biometric-like data: tell people when you're transcribing. They stay on this PC and are deleted with the note they came from."
           checked={settings.speakers.recognize}
           onChange={(v) => onChange({ speakers: { ...settings.speakers, recognize: v } })}
         />
-        {settings.speakers.recognize && <Voices />}
+        <Voices recognize={settings.speakers.recognize} />
         <Toggle
           label="Name people from the Teams window"
-          hint="While a Teams call is recorded, Kasha reads who's in it and who's muted from the meeting window, the way a screen reader does. A one-to-one call is named outright; in a group call, a voice that talks while only one person is unmuted gets that name to confirm. No captions needed, and nothing leaves this PC."
+          hint="While a Teams call is recorded, Kasha reads who's in it and who's muted from the meeting window, the way a screen reader does. In a one-to-one call the other voice is offered that person's name to confirm; in a group call, a voice that talks while only one person is unmuted is too. People in the call also show on the Attendees tab. No captions needed, and nothing leaves this PC."
           checked={settings.speakers.fromTeams}
           onChange={(v) => onChange({ speakers: { ...settings.speakers, fromTeams: v } })}
         />

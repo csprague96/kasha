@@ -53,6 +53,7 @@ const kasha: KashaApi = {
 
   listVoices: () => invoke('voices:list'),
   removeVoice: (name) => invoke('voices:remove', name),
+  forgetAllVoices: () => invoke('voices:forgetAll'),
 
   appInfo: () => invoke('app:info'),
   updateStatus: () => invoke('update:status'),

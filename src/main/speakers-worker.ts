@@ -27,9 +27,9 @@ export interface SpeakerRequest {
    */
   expected?: number
   /**
-   * How many other people were in the call (seen in the Teams window). Unlike
-   * the invite, that's an upper bound: voices beyond it are pieces of someone
-   * already found, and the most alike are joined until there are no more.
+   * How many other people were in the call (seen in the Teams window). Voices
+   * beyond it are probably pieces of someone already found, and are joined to
+   * the voice most like them when they sound alike (see consolidate).
    */
   max?: number
 }
@@ -38,6 +38,8 @@ export interface SpeakerCluster {
   segments: Array<{ start: number; end: number }>
   seconds: number
   embedding: number[]
+  /** Joined only to fit the head count: it may be two people, so it's never learned as a voice. */
+  capped?: boolean
 }
 
 export interface SpeakerResponse {
@@ -66,8 +68,8 @@ const CUT = 0.3 // windows grouped while their average similarity is at least th
 // that appear. Beyond 0.45 the voiceprints shatter into fragments.
 const CUTS = [CUT, 0.4]
 const SUBSTANTIAL = 20 // seconds of speech for a group to count as a person
-const SAME = 0.7 // groups this alike are one person even when more are expected
 const MERGE = 0.4 // clusters at least this similar are the same person; split pieces of one voice rejoin here
+const CAP_FLOOR = 0.35 // the head-count cap only joins voices at least this alike (different people reached 0.32)
 const TINY = 4 // clusters with less speech than this join their nearest voice…
 const TINY_MATCH = 0.3 // …if it sounds at least this alike. Otherwise they're someone who said little.
 const CRUMB = 2.5 // less than this always joins its nearest voice: a 60-minute call left four 1-2 s "speakers"
@@ -216,14 +218,18 @@ function groupWithHint(vectors: number[][], lengths: number[], expected?: number
 
 /**
  * Merges clusters that are the same voice, then folds tiny ones into their
- * nearest. With an expected head count, alike clusters stop merging once
- * there are that many people, unless they're near-identical.
+ * nearest. With `max` (people seen in the call), substantial voices beyond it
+ * are joined to the voice most like them, but only if they sound alike
+ * (CAP_FLOOR): different people measured up to 0.32 on a real call, so a
+ * short head count (a dial-in, a room system, a cut-off gallery) must not
+ * merge them. Voices a cap merge made are marked `capped`, and never learned.
  */
-function consolidate(clusters: SpeakerCluster[], expected?: number, max?: number): SpeakerCluster[] {
-  const join = (into: SpeakerCluster, from: SpeakerCluster): SpeakerCluster => ({
+export function consolidate(clusters: SpeakerCluster[], max?: number): SpeakerCluster[] {
+  const join = (into: SpeakerCluster, from: SpeakerCluster, capped = false): SpeakerCluster => ({
     segments: [...into.segments, ...from.segments].sort((x, y) => x.start - y.start),
     seconds: into.seconds + from.seconds,
-    embedding: average(into.embedding, into.seconds, from.embedding, from.seconds)
+    embedding: average(into.embedding, into.seconds, from.embedding, from.seconds),
+    capped: capped || into.capped || from.capped
   })
   let list = clusters.slice()
   for (;;) {
@@ -231,8 +237,7 @@ function consolidate(clusters: SpeakerCluster[], expected?: number, max?: number
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         const score = cosine(list[i].embedding, list[j].embedding)
-        const enough = !!expected && people(list.map((c) => c.seconds)) <= expected
-        if (score >= (enough ? SAME : MERGE) && (!best || score > best.score)) best = { i, j, score }
+        if (score >= MERGE && (!best || score > best.score)) best = { i, j, score }
       }
     }
     if (!best) break
@@ -252,17 +257,22 @@ function consolidate(clusters: SpeakerCluster[], expected?: number, max?: number
     }
     list = [...big, ...kept]
   }
-  // No more voices than people in the call.
-  while (max && max > 0 && list.length > max) {
-    let best = { i: 0, j: 1, score: -Infinity }
+  // No more people than were in the call. Only voices with real speech count
+  // (a few seconds of someone isn't a person to merge away), and only voices
+  // that sound alike are joined: if none do, the extra voice stays, since it
+  // may be someone Teams didn't show.
+  while (max && max > 0 && people(list.map((c) => c.seconds)) > max) {
+    let best: { i: number; j: number; score: number } | null = null
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
+        if (list[i].seconds < SUBSTANTIAL || list[j].seconds < SUBSTANTIAL) continue
         const score = cosine(list[i].embedding, list[j].embedding)
-        if (score > best.score) best = { i, j, score }
+        if (score >= CAP_FLOOR && (!best || score > best.score)) best = { i, j, score }
       }
     }
-    const merged = join(list[best.i], list[best.j])
-    list = list.filter((_, k) => k !== best.i && k !== best.j)
+    if (!best) break
+    const merged = join(list[best.i], list[best.j], true)
+    list = list.filter((_, k) => k !== best!.i && k !== best!.j)
     list.push(merged)
   }
   return list.sort((a, b) => a.segments[0].start - b.segments[0].start)
@@ -371,7 +381,7 @@ export function separate(req: SpeakerRequest): SpeakerCluster[] {
       if (seconds < 0.5) continue
       clusters.push({ segments, seconds, embedding: embeddingOf(segments) })
     }
-    return consolidate(clusters, req.expected, req.max)
+    return consolidate(clusters, req.max)
   } finally {
     closeSync(fd)
   }

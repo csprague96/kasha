@@ -17,7 +17,7 @@ import {
   Tray,
   type WebContents
 } from 'electron'
-import { existsSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { freemem } from 'node:os'
 import { basename, join, normalize, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -49,12 +49,12 @@ import { getLive, startLive, takeLive, type LiveTranscriber } from './live'
 import { exportFileName, exportOptions, syncToObsidian, vaultFiles } from './obsidian'
 import { cleanText, enqueue, type PipelineEvents } from './pipeline'
 import { Recording, repairWav, SAMPLE_RATE, type Track } from './recorder'
-import { saveRoster, teamsCallOpen, TeamsRoster } from './roster'
+import { addressFits, rosterDone, teamsCallOpen, TeamsRoster } from './roster'
 import { takeScreenshot } from './screenshot'
 import { copyToClipboard, emailDraft, saveMarkdown, savePdf } from './share'
 import { redact } from './redact'
 import { downloadSpeech, setupStatus, speakersReady, speechReady } from './setup'
-import { syncVoices } from './speakers'
+import { forgetMeetingVoices, syncVoices } from './speakers'
 import { whisperPrompt } from './speech'
 import * as store from './store'
 import { splitNote } from './summarizer'
@@ -232,7 +232,8 @@ function alwaysRecords(title: string, match?: CalendarMatch | null): boolean {
   const r = ruleSettings()
   const titles = [title, match?.subject ?? ''].filter((t) => t && !GENERIC_TITLE.test(t))
   if (titles.some((t) => listHas(r.meetings, t))) return true
-  return r.people.some((p) => mentions(title, p) || !!match?.attendees.some((a) => mentions(a, p)))
+  // The calendar often lists people only by address, so an address that fits the name counts too.
+  return r.people.some((p) => mentions(title, p) || !!match?.attendees.some((a) => mentions(a, p) || addressFits(a, p)))
 }
 
 /** The title a recurring-meeting rule would use: the window title, or the calendar subject when that's generic. */
@@ -378,7 +379,7 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
   // Live transcription starts again from the top of what's already recorded.
   for (const [track, bytes] of Object.entries(rec.lengths())) live?.wrote(track as Track, bytes)
   // A Teams call (detected, or recorded by hand while one is on): read who's in it.
-  const roster = settings.speakers.fromTeams && (meeting.app === 'teams' || detector.isLive('teams')) ? new TeamsRoster(startedAt) : null
+  const roster = settings.speakers.fromTeams && (meeting.app === 'teams' || detector.isLive('teams')) ? new TeamsRoster(startedAt, id) : null
   void roster?.start()
   recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted, restarts: [], roster }
   log('recording-started', { app: meeting.app, how: resume ? 'resume' : opts.auto ? 'auto' : opts.accepted ? 'prompt' : 'manual', live: !!live, model: settings.speechModel, carriedOnMin: had ? Math.round(had / 60) : undefined })
@@ -487,7 +488,10 @@ function finalizeRecording(): void {
   // How far live transcription is behind: what's left to do after the call.
   const behind = live?.pending()
   const tracks = rec.close()
-  if (roster) saveRoster(meetingId, roster.stop())
+  if (roster) {
+    roster.stop()
+    rosterDone(meetingId)
+  }
   log('recording-stopped', { tracks: tracks.map((t) => t.track).join('+') || 'none', minutes: Math.round((Date.now() - startedAt) / 60_000), chunksLeft: behind })
   store.updateMeeting(meetingId, {
     recordingEndedAt: new Date().toISOString(),
@@ -758,6 +762,8 @@ function registerIpc(): void {
         }
       }
     }
+    // Voices learned from this meeting go with it (they're biometric-like data).
+    forgetMeetingVoices(id)
     store.deleteMeeting(id)
     broadcast('meetings-changed')
     if (opts?.remember) {
@@ -846,6 +852,12 @@ function registerIpc(): void {
 
   handle('voices:list', () => voices.list())
   handle('voices:remove', (name: string) => voices.remove(String(name)))
+  // Every learned voice, and every meeting's voiceprints.
+  handle('voices:forgetAll', () => {
+    voices.clear()
+    for (const m of store.listMeetings()) rmSync(join(store.paths.meeting(m.id), 'speakers.json'), { force: true })
+    log('voices-forgotten')
+  })
   handle('setup:pickFolder', async () => {
     const opts: Electron.OpenDialogOptions = { properties: ['openDirectory', 'createDirectory'] }
     const r = mainWin ? await dialog.showOpenDialog(mainWin, opts) : await dialog.showOpenDialog(opts)
@@ -979,7 +991,7 @@ app.on('before-quit', () => {
     // Close files cleanly so the audio can still be processed next time.
     const { meetingId, rec, roster } = recording
     rec.close()
-    if (roster) saveRoster(meetingId, roster.stop())
+    roster?.stop()
     takeLive(meetingId)?.stop()
     store.updateMeeting(meetingId, { status: 'failed', error: 'Kasha quit during recording. Select Retry to process the audio.', recordingEndedAt: new Date().toISOString() })
     recording = null

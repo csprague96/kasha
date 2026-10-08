@@ -82,11 +82,19 @@ export interface SummaryContext {
   attendees?: string[]
   /** Seen in the call itself (the Teams window), besides the note taker. */
   participants?: string[]
+  /** Speakers whose name is a guess the user hasn't confirmed. */
+  guessed?: SpeakerId[]
 }
 
 function buildPrompt(ctx: SummaryContext, notes: string, transcript: TranscriptSegment[]): string {
   // The note taker stays "You" even when named, so the rules above still apply.
-  const label = (t: TranscriptSegment) => (t.speaker === 'you' ? 'You' : speakerName(t.speaker, ctx.speakers))
+  // A guessed name is labelled as one, so the summary doesn't state it as fact.
+  const label = (t: TranscriptSegment) =>
+    t.speaker === 'you'
+      ? 'You'
+      : ctx.guessed?.includes(t.speaker) && ctx.speakers?.[t.speaker]
+        ? `${speakerName(t.speaker)} (possibly ${ctx.speakers[t.speaker]})`
+        : speakerName(t.speaker, ctx.speakers)
   const lines = transcript.map((t) => `[${clock(t.start)}] ${label(t)}: ${t.text}`)
   const d = ctx.meetingDate
   const date = `${d.toLocaleDateString('en-GB', { weekday: 'long' })} ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
