@@ -5,6 +5,7 @@ import { basename, join } from 'node:path'
 import type { Meeting, SpeakerId, TranscriptSegment } from '@shared/types'
 import { speakerPaths } from './setup'
 import type { SpeakerCluster, SpeakerRequest, SpeakerResponse } from './speakers-worker'
+import { background } from './background'
 import { log } from './log'
 import { BATCH_THREADS } from './speech'
 import * as store from './store'
@@ -45,30 +46,50 @@ export function readEmbeddings(meetingId: string): SpeakerPrints {
   }
 }
 
-function runWorker(req: SpeakerRequest): Promise<SpeakerResponse> {
+/** Thrown when separation was stopped by a pause: it starts again on resume. */
+export class Stopped extends Error {
+  constructor() {
+    super('Stopped for a pause.')
+  }
+}
+
+function runWorker(req: SpeakerRequest, signal?: AbortSignal): Promise<SpeakerResponse> {
   // About a second of work per second of speech on the slowest PCs seen, so a
   // long, talk-heavy call isn't cut off and left as one "Others".
   const speech = req.spans.reduce((t, s) => t + s.end - s.start, 0)
   const limit = Math.max(TIMEOUT_MS, speech * 1000 * (6 / Math.max(1, req.threads)))
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Stopped())
     const child = utilityProcess.fork(join(__dirname, 'speakers-worker.js'), [], { serviceName: 'Kasha speakers', stdio: 'ignore' })
     const timer = setTimeout(() => {
       child.kill()
       reject(new Error('Telling speakers apart took too long.'))
     }, limit)
+    // A call that starts meanwhile gets the CPU first: this drops to the lowest priority, and back after.
+    const prioritize = () => {
+      try {
+        if (child.pid) setPriority(child.pid, background.lowest() ? constants.priority.PRIORITY_LOW : constants.priority.PRIORITY_BELOW_NORMAL)
+      } catch {
+        /* not fatal */
+      }
+    }
+    const offChange = background.onChange(prioritize)
+    const onAbort = () => {
+      child.kill()
+      finish(() => reject(new Stopped()))
+    }
+    signal?.addEventListener('abort', onAbort)
     let done = false
     const finish = (fn: () => void) => {
       if (done) return
       done = true
       clearTimeout(timer)
+      offChange()
+      signal?.removeEventListener('abort', onAbort)
       fn()
     }
     child.once('spawn', () => {
-      try {
-        if (child.pid) setPriority(child.pid, constants.priority.PRIORITY_BELOW_NORMAL)
-      } catch {
-        /* not fatal */
-      }
+      prioritize()
       child.postMessage(req)
     })
     child.on('message', (res: SpeakerResponse) => finish(() => (res.error ? reject(new Error(res.error)) : resolve(res))))
@@ -167,7 +188,7 @@ export async function separateSpeakers(
   meetingId: string,
   sysWav: string,
   transcript: TranscriptSegment[],
-  opts: { expected?: number; max?: number; candidates?: string[]; threads?: number } = {}
+  opts: { expected?: number; max?: number; candidates?: string[]; threads?: number; signal?: AbortSignal } = {}
 ): Promise<SeparateResult> {
   const spans = transcript.filter((s) => s.speaker === 'others').map((s) => ({ start: s.start, end: s.end }))
   if (!spans.length) return { transcript, matches: {}, capped: [] }
@@ -180,7 +201,7 @@ export async function separateSpeakers(
     threads,
     expected: opts.expected,
     max: opts.max
-  })
+  }, opts.signal)
   const clusters = res.clusters ?? []
   // Numbers only: where the time went, to keep separation cheap.
   if (res.timings) log('speakers-timings', { threads, ...Object.fromEntries(Object.entries(res.timings).map(([k, v]) => [k, Math.round(v)])) })

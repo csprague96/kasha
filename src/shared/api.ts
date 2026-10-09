@@ -2,6 +2,7 @@ import type {
   ActionGroup,
   AppInfo,
   AudioInfo,
+  BackgroundState,
   CalendarMatch,
   LiveState,
   Meeting,
@@ -62,6 +63,10 @@ export interface KashaApi {
   startRecording(id?: string): Promise<void>
   stopRecording(): Promise<void>
   currentRecording(): Promise<RecordingInfo | null>
+  /** Finishing earlier meetings: whether it's paused or slowed for a call. */
+  backgroundState(): Promise<BackgroundState>
+  /** Pauses or resumes finishing earlier meetings. Resuming while memory is low carries on anyway. */
+  setBackgroundPaused(paused: boolean): Promise<void>
 
   // Settings + setup
   getSettings(): Promise<Settings>
@@ -103,6 +108,7 @@ export interface KashaApi {
   onActionsChanged(cb: () => void): () => void
   onRecordingChanged(cb: (r: RecordingInfo | null) => void): () => void
   onProgress(cb: (id: string, p: number | null) => void): () => void
+  onBackgroundState(cb: (s: BackgroundState) => void): () => void
   /** New lines from live transcription during a call. */
   onTranscriptLive(cb: (id: string, segments: TranscriptSegment[]) => void): () => void
   onSettingsChanged(cb: (s: Settings) => void): () => void
@@ -124,7 +130,7 @@ export interface ToastApi {
 export interface BarApi {
   info(): Promise<RecordingInfo | null>
   live(): Promise<LiveState>
-  /** Pauses or resumes transcribing during the call. Recording carries on. */
+  /** Pauses or resumes transcribing during the call, and finishing an earlier note. Recording carries on. */
   setPaused(paused: boolean): void
   onLiveState(cb: (s: LiveState) => void): () => void
   sendChunk(track: 'mic' | 'sys', pcm: ArrayBuffer): void

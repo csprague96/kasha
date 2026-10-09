@@ -18,6 +18,14 @@ const MAX_WAIT = 90_000 // ms; speech waits at most this long for a chunk to fil
 const LOW_MEMORY = 1024 ** 3
 const HIGH_MEMORY = 1.4 * 1024 ** 3
 
+/** Finishing after the call, while another call may be recorded (background.ts). */
+export interface Hold {
+  /** Resolves once background work may run. */
+  wait(): Promise<void>
+  /** Whether to run at the lowest priority right now. */
+  lowest(): boolean
+}
+
 interface TrackState {
   file: string
   seconds: number // recorded so far
@@ -45,8 +53,9 @@ export class LiveTranscriber {
   private vadFailures = 0
   /** Chunks that failed in a row: a fault that lasts stops live work instead of doubling it. */
   private chunkFailures = 0
-  /** Few threads during the call; all of them for what's left after it. */
-  private threads = LIVE_THREADS
+  /** Few threads during the call; more for what's left after it, unless the next call has started. */
+  private threads: () => number = () => LIVE_THREADS
+  private hold: Hold | null = null
   private timer: NodeJS.Timeout
   private onProgress: ((p: number) => void) | null = null
   /** Free memory when the low-memory wait last started or ended, for the log. */
@@ -146,13 +155,16 @@ export class LiveTranscriber {
   /**
    * Transcribes what's left after the recording stops and waits for it. Returns
    * null if anything failed, so the caller can transcribe the files from scratch.
+   * `threads` is asked again for every chunk, and `hold` is waited on before
+   * each one: a call that starts meanwhile slows this down or pauses it.
    */
-  async finish(onProgress: (p: number) => void, threads = BATCH_THREADS): Promise<TranscriptSegment[] | null> {
+  async finish(onProgress: (p: number) => void, threads: number | (() => number) = BATCH_THREADS, hold?: Hold): Promise<TranscriptSegment[] | null> {
     clearInterval(this.timer)
-    // After the call, held-back work runs regardless, and faster unless another call has started.
+    // After the call, the user's pause and the memory wait for this call no longer apply.
     this.finishing = true
-    this.threads = threads
-    log('live-finishing', { chunksLeft: this.chunks - this.finished, threads })
+    this.threads = typeof threads === 'number' ? () => threads : threads
+    this.hold = hold ?? null
+    log('live-finishing', { chunksLeft: this.chunks - this.finished, threads: this.threads() })
     this.changed()
     this.onProgress = onProgress
     await this.checking
@@ -163,6 +175,7 @@ export class LiveTranscriber {
     // recording is transcribed from scratch instead.
     for (const r of this.redo) {
       if (this.failed) break
+      await this.hold?.wait()
       try {
         this.segments.push(...(await this.transcribe(r.track, r.chunk, r.n)))
       } catch (e) {
@@ -175,7 +188,14 @@ export class LiveTranscriber {
 
   private transcribe(track: Track, chunk: Chunk, n: number): Promise<TranscriptSegment[]> {
     const t = this.tracks[track]!
-    return transcribeChunk(t.file, chunk, speakerOf(track), { prompt: this.prompt, threads: this.threads }, join(this.dir, `live-${n}`))
+    const background = this.finishing
+    return transcribeChunk(
+      t.file,
+      chunk,
+      speakerOf(track),
+      { prompt: this.prompt, threads: this.threads(), background, lowest: background && !!this.hold?.lowest() },
+      join(this.dir, `live-${n}`)
+    )
   }
 
   stop(): void {
@@ -208,7 +228,11 @@ export class LiveTranscriber {
       if (!t) continue
       const end = t.seconds
       if (end - t.checked >= (final ? 0.3 : MIN_NEW)) {
-        const regions = await detectSpeech(t.file, { start: t.checked, end, tmp: join(this.dir, `vad-${track}.wav`) })
+        const regions = await detectSpeech(
+          t.file,
+          { start: t.checked, end, tmp: join(this.dir, `vad-${track}.wav`) },
+          { background: this.finishing, lowest: this.finishing && !!this.hold?.lowest() }
+        )
         const edge = final ? end : end - SETTLE
         const open = regions.find((r) => r.end > edge)
         if (open && edge - open.start < MAX_OPEN) {
@@ -230,6 +254,7 @@ export class LiveTranscriber {
         const chunk = c
         this.work = this.work.then(async () => {
           await this.whenRunning()
+          if (this.finishing) await this.hold?.wait()
           if (this.failed) return
           try {
             let segs: TranscriptSegment[]

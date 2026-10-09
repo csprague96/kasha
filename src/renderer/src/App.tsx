@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { ActionGroup, ActionItem, Meeting, RecordingInfo, Settings as SettingsT } from '@shared/types'
+import type { ActionGroup, ActionItem, BackgroundState, Meeting, RecordingInfo, Settings as SettingsT } from '@shared/types'
 import { ActionsView } from './components/ActionsView'
 import { NoteView } from './components/NoteView'
 import { Settings, type SettingsPage } from './components/Settings'
@@ -21,6 +21,7 @@ export function App() {
   const [meetings, setMeetings] = useState<Meeting[]>([])
   const [recording, setRecording] = useState<RecordingInfo | null>(null)
   const [progress, setProgress] = useState<Record<string, number>>({})
+  const [background, setBackground] = useState<BackgroundState | null>(null)
   const [view, setView] = useState<View>(initialView)
   const [actions, setActions] = useState<ActionGroup[]>([])
   // Settings reopens on the page last shown, unless a link asks for a particular one.
@@ -32,12 +33,14 @@ export function App() {
   useEffect(() => {
     void window.kasha.getSettings().then(setSettings)
     void window.kasha.currentRecording().then(setRecording)
+    void window.kasha.backgroundState().then(setBackground)
     refresh()
     refreshActions()
     const offs = [
       window.kasha.onMeetingsChanged(refresh),
       window.kasha.onSettingsChanged(setSettings),
       window.kasha.onActionsChanged(refreshActions),
+      window.kasha.onBackgroundState(setBackground),
       window.kasha.onRecordingChanged((r) => {
         setRecording(r)
         if (r) setView({ kind: 'note', id: r.meetingId })
@@ -135,6 +138,7 @@ export function App() {
             meeting={current}
             recording={recording}
             progress={progress[current.id]}
+            background={background}
             settings={settings}
             allTags={allTags}
           />

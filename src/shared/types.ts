@@ -298,6 +298,19 @@ export interface LiveState {
   paused: 'user' | 'memory' | null
 }
 
+/**
+ * Finishing a meeting after its call while another may be recorded. It
+ * yields to the call, waits while memory is low during one, and can be
+ * paused; a pause lasts until resumed or the recording ends.
+ */
+export interface BackgroundState {
+  paused: 'user' | 'memory' | null
+  /** A call is being recorded, so this runs slower. */
+  inCall: boolean
+  /** The meeting being finished now, if any. */
+  meetingId?: string | null
+}
+
 export interface RecordingInfo {
   meetingId: string
   title: string

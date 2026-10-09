@@ -47,7 +47,8 @@ import { log } from './log'
 import { MeetingDetector } from './detector'
 import { getLive, startLive, takeLive, type LiveTranscriber } from './live'
 import { exportFileName, exportOptions, syncToObsidian, vaultFiles } from './obsidian'
-import { cleanText, enqueue, type PipelineEvents } from './pipeline'
+import { background } from './background'
+import { cleanText, enqueue, processing, type PipelineEvents } from './pipeline'
 import { Recording, repairWav, SAMPLE_RATE, type Track } from './recorder'
 import { addressFits, rosterDone, teamsCallOpen, TeamsRoster } from './roster'
 import { takeScreenshot } from './screenshot'
@@ -290,7 +291,20 @@ function liveState(): LiveState {
 
 function setLivePaused(paused: boolean): void {
   recording?.live?.setPaused(paused)
+  // The bar's pause holds back everything, an earlier note being finished
+  // included. "Transcribe now" while memory is low is for this call only:
+  // the earlier note keeps waiting for memory.
+  if (paused || background.state().paused === 'user') background.setPaused(paused)
 }
+
+const backgroundState = () => ({ ...background.state(), meetingId: processing() })
+
+background.setMemoryWatch(() => store.getSettings().recording.pauseWhenLowMemory)
+background.onChange((s) => {
+  log('background', { paused: s.paused ?? 'no', inCall: s.inCall, busy: !!processing(), freeMB: s.paused === 'memory' ? background.freeMB : undefined })
+  broadcast('background-state', backgroundState())
+  refreshTray()
+})
 
 // ---------- Tray ----------
 
@@ -317,6 +331,16 @@ function refreshTray(): void {
               : liveState().paused === 'memory'
                 ? { label: 'Transcribe now (memory is low)', click: () => setLivePaused(false) }
                 : { label: 'Pause transcribing', click: () => setLivePaused(true) }
+          ]
+        : []),
+      // Finishing an earlier note, when the bar's pause doesn't already cover it.
+      ...(processing() && !recording?.live
+        ? [
+            background.state().paused === 'user'
+              ? { label: 'Resume finishing notes', click: () => background.setPaused(false) }
+              : background.state().paused === 'memory'
+                ? { label: 'Finish notes now (memory is low)', click: () => background.setPaused(false) }
+                : { label: 'Pause finishing notes', click: () => background.setPaused(true) }
           ]
         : []),
       { label: 'Actions', click: () => showMain({ actions: true }) },
@@ -393,6 +417,8 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
   const roster = settings.speakers.fromTeams && (meeting.app === 'teams' || detector.isLive('teams')) ? new TeamsRoster(startedAt, id) : null
   void roster?.start()
   recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted, restarts: [], roster, lastAudio: Date.now() }
+  // An earlier note still being finished makes room for this call.
+  background.setInCall(true)
   log('recording-started', { app: meeting.app, how: resume ? 'resume' : opts.auto ? 'auto' : opts.accepted ? 'prompt' : 'manual', live: !!live, model: settings.speechModel, carriedOnMin: had ? Math.round(had / 60) : undefined })
   closeToast()
   if ((opts.auto || resume) && Notification.isSupported()) {
@@ -509,11 +535,14 @@ function stopRecording(): void {
 }
 
 const pipelineEvents: PipelineEvents = {
-  inCall: () => !!recording,
   settingsChanged: () => broadcast('settings-changed', store.getSettings()),
   changed: () => {
     broadcast('meetings-changed')
     broadcast('actions-changed')
+    // Which note is being finished moves on with the queue; the tray's
+    // "Pause finishing notes" comes and goes with it.
+    broadcast('background-state', backgroundState())
+    refreshTray()
   },
   progress: (id, p) => broadcast('progress', id, p),
   done: (m) => {
@@ -528,6 +557,8 @@ function finalizeRecording(): void {
   if (!recording) return
   const { meetingId, rec, startedAt, roster, live } = recording
   recording = null
+  // The call is over: earlier notes carry on at full speed, and a pause is lifted.
+  background.setInCall(false)
   // How far live transcription is behind: what's left to do after the call.
   const behind = live?.pending()
   const tracks = rec.close()
@@ -862,6 +893,8 @@ function registerIpc(): void {
   handle('rec:start', (id?: string) => startRecording(id))
   handle('rec:stop', () => stopRecording())
   handle('rec:current', () => recordingInfo())
+  handle('background:state', () => backgroundState())
+  handle('background:setPaused', (paused: boolean) => background.setPaused(!!paused))
 
   handle('settings:get', () => store.getSettings())
   handle('settings:set', (patch: Partial<Settings>) => {

@@ -159,7 +159,7 @@ function Bar() {
       ? 'Resume transcribing'
       : paused === 'memory'
         ? 'Transcribing is waiting for free memory. Select to transcribe now anyway (the PC may slow down). Recording carries on either way.'
-        : 'Pause transcribing. Recording carries on; the transcript catches up later.'
+        : 'Pause transcribing, and finishing any earlier note. Recording carries on; transcripts catch up later.'
 
   return (
     <div className="flex h-full items-center p-1">

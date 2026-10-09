@@ -39,6 +39,8 @@ const kasha: KashaApi = {
   startRecording: (id) => invoke('rec:start', id),
   stopRecording: () => invoke('rec:stop'),
   currentRecording: () => invoke('rec:current'),
+  backgroundState: () => invoke('background:state'),
+  setBackgroundPaused: (paused) => invoke('background:setPaused', paused),
 
   getSettings: () => invoke('settings:get'),
   setSettings: (patch) => invoke('settings:set', patch),
@@ -69,6 +71,7 @@ const kasha: KashaApi = {
   onActionsChanged: (cb) => on('actions-changed', cb),
   onRecordingChanged: (cb) => on('recording-changed', cb),
   onProgress: (cb) => on('progress', cb),
+  onBackgroundState: (cb) => on('background-state', cb),
   onTranscriptLive: (cb) => on('transcript-live', cb),
   onSettingsChanged: (cb) => on('settings-changed', cb),
   onUpdateStatus: (cb) => on('update-status', cb)
