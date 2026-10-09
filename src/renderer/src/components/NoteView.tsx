@@ -1,6 +1,6 @@
-import { Download, ExternalLink, Loader2, RefreshCw, X } from 'lucide-react'
+import { Download, ExternalLink, Loader2, Pause, Play, RefreshCw, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { normTag, type AudioInfo, type Meeting, type RecordingInfo, type Settings, type TranscriptSegment } from '@shared/types'
+import { normTag, type AudioInfo, type BackgroundState, type Meeting, type RecordingInfo, type Settings, type TranscriptSegment } from '@shared/types'
 import { cn, hhmm, meetingMeta, timer } from '@/lib/utils'
 import { Attendees } from './Attendees'
 import { CorrectWord, type WordAt } from './CorrectWord'
@@ -14,6 +14,8 @@ interface Props {
   meeting: Meeting
   recording: RecordingInfo | null
   progress?: number
+  /** Finishing notes after their call: paused, or slower while another call is recorded. */
+  background?: BackgroundState | null
   settings: Settings
   /** Tags on any note, for suggestions. */
   allTags: string[]
@@ -62,7 +64,7 @@ function Title({ meeting }: { meeting: Meeting }) {
   )
 }
 
-function Actions({ meeting, recording, progress, settings, hasTranscript }: Props & { hasTranscript: boolean }) {
+function Actions({ meeting, recording, progress, background, settings, hasTranscript }: Props & { hasTranscript: boolean }) {
   const now = useNow(!!recording)
   const isThis = recording?.meetingId === meeting.id
 
@@ -85,10 +87,42 @@ function Actions({ meeting, recording, progress, settings, hasTranscript }: Prop
         : meeting.status === 'separating'
           ? 'Telling speakers apart'
           : 'Writing summary'
+    // Notes are finished one at a time: this one may be waiting its turn.
+    const waiting = !!background?.meetingId && background.meetingId !== meeting.id
+    const mine = background?.meetingId === meeting.id
+    const paused = mine ? background.paused : null
+    const note = waiting
+      ? 'waiting for an earlier note'
+      : paused === 'user'
+        ? 'paused'
+        : paused === 'memory'
+          ? 'waiting for free memory'
+          : mine && background.inCall
+            ? 'slower during the call'
+            : null
+    const hint =
+      paused === 'user'
+        ? 'Carry on finishing this note.'
+        : paused === 'memory'
+          ? 'Kasha is waiting for free memory during the call. Select to carry on anyway (the PC may slow down).'
+          : background?.inCall
+            ? 'Pause finishing this note, to leave the PC to the call. It carries on when you resume or the recording ends.'
+            : 'Pause finishing this note, to give the PC a break. It carries on when you resume.'
     return (
-      <div className="flex h-9 items-center gap-2 text-[13px] text-muted" role="status">
-        <Loader2 className="size-4 animate-spin" />
-        <span className="tabular">{label}</span>
+      <div className="flex items-center gap-1">
+        <div className="flex h-9 items-center gap-2 text-[13px] text-muted" role="status">
+          {paused ? <Pause className="size-4" /> : <Loader2 className="size-4 animate-spin" />}
+          <span className="tabular">
+            {label}
+            {note && ` · ${note}`}
+          </span>
+        </div>
+        {mine && (
+          <Button variant="ghost" size="sm" onClick={() => void window.kasha.setBackgroundPaused(!paused)} title={hint} aria-label={hint}>
+            {paused ? <Play /> : <Pause />}
+            {paused === 'user' ? 'Resume' : paused === 'memory' ? 'Carry on' : 'Pause'}
+          </Button>
+        )}
       </div>
     )
   }

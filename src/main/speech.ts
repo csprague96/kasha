@@ -46,21 +46,53 @@ export const BATCH_THREADS = Math.min(6, Math.max(2, Math.floor(cores / 2)))
 
 // ---------- Processes ----------
 
-let lock: Promise<unknown> = Promise.resolve()
-
-/** One speech process at a time, so a live call and a backlog never stack CPU load. */
-function exclusive<T>(fn: () => Promise<T>): Promise<T> {
-  const next = lock.then(fn, fn)
-  lock = next.catch(() => undefined)
-  return next
+/**
+ * Who a speech process is for. 'live' is the call being recorded; 'background'
+ * is finishing an earlier meeting. `lowest` runs it at the lowest priority
+ * (background work during a call).
+ */
+export interface Priority {
+  background?: boolean
+  lowest?: boolean
 }
 
-function run(exe: string, args: string[], keepStderr = false): Promise<{ code: number | null; out: string; err: string }> {
+const waiting: { live: Array<() => void>; background: Array<() => void> } = { live: [], background: [] }
+let running = false
+
+/**
+ * One speech process at a time, so a live call and a backlog never stack CPU
+ * load. The call being recorded goes first: an earlier meeting still being
+ * finished waits between its chunks, so the live transcript keeps up.
+ */
+export function exclusive<T>(fn: () => Promise<T>, background = false): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    waiting[background ? 'background' : 'live'].push(() => {
+      void Promise.resolve()
+        .then(fn)
+        .then(resolve, reject)
+        .finally(() => {
+          running = false
+          next()
+        })
+    })
+    next()
+  })
+}
+
+function next(): void {
+  if (running) return
+  const job = waiting.live.shift() ?? waiting.background.shift()
+  if (!job) return
+  running = true
+  job()
+}
+
+function run(exe: string, args: string[], keepStderr = false, lowest = false): Promise<{ code: number | null; out: string; err: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(exe, args, { windowsHide: true })
     // Speech work always yields to whatever the user is doing.
     try {
-      if (child.pid) setPriority(child.pid, constants.priority.PRIORITY_BELOW_NORMAL)
+      if (child.pid) setPriority(child.pid, lowest ? constants.priority.PRIORITY_LOW : constants.priority.PRIORITY_BELOW_NORMAL)
     } catch {
       /* not fatal */
     }
@@ -130,7 +162,7 @@ function writeChunk(track: string, chunk: Chunk, out: string): void {
  * that part of the track is checked (copied to `tmp` first), for use while the
  * track is still being recorded.
  */
-export async function detectSpeech(track: string, window?: Span & { tmp: string }): Promise<Span[]> {
+export async function detectSpeech(track: string, window?: Span & { tmp: string }, priority: Priority = {}): Promise<Span[]> {
   const exe = whisperPaths.vadCli()
   if (!exe) throw new Error('Speech model is not installed.')
   let input = track
@@ -146,7 +178,7 @@ export async function detectSpeech(track: string, window?: Span & { tmp: string 
     offset = window.start
   }
   try {
-    const { code, out, err } = await exclusive(() => run(exe, ['-vm', whisperPaths.vad(), '-f', input, '-np', '-t', '2']))
+    const { code, out, err } = await exclusive(() => run(exe, ['-vm', whisperPaths.vad(), '-f', input, '-np', '-t', '2'], false, priority.lowest), priority.background)
     if (code !== 0) throw new Error(`Speech detection failed (exit ${code}). ${lastLine(err)}`)
     // Times are printed in centiseconds.
     return Array.from(out.matchAll(/start = ([\d.]+), end = ([\d.]+)/g), (m) => ({
@@ -286,7 +318,7 @@ export function parakeetGroups(stderr: string): TokenGroup[] {
   return [{ tokens }]
 }
 
-export interface WhisperOptions {
+export interface WhisperOptions extends Priority {
   prompt: string
   threads: number
 }
@@ -307,7 +339,7 @@ export async function transcribeChunk(
     if (model.engine === 'parakeet') {
       const cli = whisperPaths.parakeetCli()!
       const args = ['-m', model.file, '-f', wav, '-t', String(opts.threads), '-ps', '-np']
-      const { code, err } = await exclusive(() => run(cli, args, true))
+      const { code, err } = await exclusive(() => run(cli, args, true, opts.lowest), opts.background)
       if (code !== 0) throw new Error(`Transcription failed (exit ${code}). ${lastLine(err)}`)
       return toLines(parakeetGroups(err), chunk, speaker)
     }
@@ -328,7 +360,7 @@ export async function transcribeChunk(
       '-np'
     ]
     if (opts.prompt) args.push('--prompt', opts.prompt)
-    const { code, err } = await exclusive(() => run(cli, args))
+    const { code, err } = await exclusive(() => run(cli, args, false, opts.lowest), opts.background)
     if (code !== 0) throw new Error(`Transcription failed (exit ${code}). ${lastLine(err)}`)
     return toLines(whisperGroups(JSON.parse(readFileSync(`${tmp}.json`, 'utf8')) as WhisperJson), chunk, speaker)
   } finally {

@@ -58,6 +58,22 @@ describe('LiveTranscriber.finish', () => {
     expect(transcribe.mock.calls[0][3]).toMatchObject({ threads: 6 })
   })
 
+  it('after the call, waits on a pause and runs as background work', async () => {
+    transcribe.mockResolvedValue([line('x')])
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const hold = { wait: vi.fn(() => gate), lowest: () => true }
+    let threads = 2
+    const done = make().finish(() => undefined, () => threads, hold)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(transcribe).not.toHaveBeenCalled()
+    threads = 1
+    release()
+    expect((await done)?.map((s) => s.text)).toEqual(['x'])
+    expect(hold.wait).toHaveBeenCalled()
+    expect(transcribe.mock.calls[0][3]).toMatchObject({ threads: 1, background: true, lowest: true })
+  })
+
   it('a speech-detection failure at the end means transcribing from scratch', async () => {
     detect.mockRejectedValue(new Error('vad'))
     expect(await make().finish(() => undefined, 2)).toBeNull()

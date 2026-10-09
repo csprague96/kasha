@@ -2,6 +2,7 @@ import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { applyVocabulary } from '@shared/text'
 import { GENERIC_TITLE, type Meeting, type SpeakerId, type TranscriptSegment } from '@shared/types'
+import { background } from './background'
 import { takeLive } from './live'
 import { log } from './log'
 import { exportOptions, syncToObsidian } from './obsidian'
@@ -9,8 +10,8 @@ import type { Track } from './recorder'
 import { redact } from './redact'
 import { speakersReady } from './setup'
 import { namesFromRoster, participants, readRoster, resolveAttendees, selfName } from './roster'
-import { separateSpeakers, type SeparateResult } from './speakers'
-import { BATCH_THREADS, LIVE_THREADS, whisperPrompt } from './speech'
+import { separateSpeakers, Stopped, type SeparateResult } from './speakers'
+import { whisperPrompt } from './speech'
 import * as store from './store'
 import { carryChecks, speakerGuesses, splitNote, summarize, summaryMarkdown } from './summarizer'
 import { finalize, transcribe } from './transcriber'
@@ -20,14 +21,19 @@ export interface PipelineEvents {
   changed(id: string): void
   /** Settings changed here (the note taker's name, learned from Teams). */
   settingsChanged(): void
-  /** A call is being recorded: processing uses few threads so the call and its live transcript come first. */
-  inCall(): boolean
   progress(id: string, p: number | null): void
   done(m: Meeting): void
 }
 
 let queue: Promise<void> = Promise.resolve()
 const queued = new Set<string>()
+let running: string | null = null
+
+/**
+ * The meeting being processed now, if any. Processing yields to a call being
+ * recorded and can be paused (background.ts).
+ */
+export const processing = () => running
 
 /**
  * Processing runs one meeting at a time so back-to-back calls don't stack CPU
@@ -37,9 +43,14 @@ export function enqueue(id: string, events: PipelineEvents): void {
   if (queued.has(id)) return
   queued.add(id)
   queue = queue
-    .then(() => {
+    .then(async () => {
       queued.delete(id)
-      return run(id, events)
+      running = id
+      try {
+        await run(id, events)
+      } finally {
+        running = null
+      }
     })
     .catch(() => undefined)
 }
@@ -71,8 +82,7 @@ async function identify(
   tracks: Array<{ track: Track; file: string }>,
   set: Setter,
   secs: () => number,
-  onSettings: () => void,
-  inCall: () => boolean
+  onSettings: () => void
 ): Promise<TranscriptSegment[]> {
   let m = store.getMeeting(id)!
   const timeline = readRoster(id)
@@ -109,13 +119,30 @@ async function identify(
       // Teams says how many people there were at most. Everyone invited or
       // seen is who a known voice may be.
       const invited = m.attendees ?? []
-      const r = await separateSpeakers(id, sys.file, transcript, {
-        expected: invited.length >= 2 ? Math.min(invited.length - 1, 8) : undefined,
-        max: people.length || undefined,
-        // During the next call, separation stays out of its way.
-        threads: inCall() ? Math.max(1, Math.floor(LIVE_THREADS / 2)) : undefined,
-        candidates: people.length || invited.length ? [...people, ...invited] : undefined
-      })
+      let r: SeparateResult | undefined
+      // The user's pause stops the worker (it can't be suspended), and it
+      // starts over on resume. Low memory only holds off starting it:
+      // stopping it would free memory and start it again, over and over.
+      while (!r) {
+        await background.wait()
+        const stop = new AbortController()
+        const off = background.onChange((s) => s.paused === 'user' && stop.abort())
+        try {
+          r = await separateSpeakers(id, sys.file, transcript, {
+            expected: invited.length >= 2 ? Math.min(invited.length - 1, 8) : undefined,
+            max: people.length || undefined,
+            // During the next call, separation stays out of its way.
+            threads: background.threads(),
+            candidates: people.length || invited.length ? [...people, ...invited] : undefined,
+            signal: stop.signal
+          })
+        } catch (e) {
+          if (!(e instanceof Stopped)) throw e
+          log('speakers-paused', { secs: secs() })
+        } finally {
+          off()
+        }
+      }
       transcript = r.transcript
       matches = r.matches
       transcript = store.writeTranscript(id, transcript)
@@ -172,11 +199,12 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
       const progress = (p: number) => ev.progress(id, p)
       // Live transcription usually has everything but the last few seconds done.
       // If it failed, the recorded files are transcribed from the start.
-      const threads = ev.inCall() ? LIVE_THREADS : BATCH_THREADS
-      const fromLive = live ? await live.finish(progress, threads) : null
+      // A call recorded meanwhile goes first: this runs on fewer threads and waits while paused.
+      const threads = () => background.threads()
+      const fromLive = live ? await live.finish(progress, threads, background) : null
       const segs = fromLive
         ? finalize(tracks, fromLive)
-        : await transcribe(tracks, whisperPrompt(store.getSettings()), progress, threads)
+        : await transcribe(tracks, whisperPrompt(store.getSettings()), progress, threads, background)
       transcript = segs.map((s) => ({ ...s, text: cleanText(s.text) }))
       transcript = store.writeTranscript(id, transcript)
       ev.progress(id, null)
@@ -193,7 +221,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
     // Notes processed before this step existed: already split or named, so not again.
     const before = !fresh && (transcript.some((s) => /^s\d+$/.test(s.speaker)) || Object.keys(cur?.speakers ?? {}).length > 0)
     if (transcript.length && !cur?.separated && !before && (fresh || wasStatus === 'separating' || wasStatus === 'failed')) {
-      transcript = await identify(id, transcript, tracks, set, secs, () => ev.settingsChanged(), ev.inCall)
+      transcript = await identify(id, transcript, tracks, set, secs, () => ev.settingsChanged())
     }
 
     let meeting = store.getMeeting(id)!
@@ -202,6 +230,7 @@ async function run(id: string, ev: PipelineEvents): Promise<void> {
     let summaryError: string | undefined
     if (transcript.length > 0) {
       set({ status: 'summarizing', error: undefined })
+      await background.wait()
       try {
         // Only the user's own notes: a summary Kasha wrote earlier is rewritten, not summarized.
         const s = await summarize(

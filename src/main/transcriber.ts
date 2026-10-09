@@ -1,6 +1,7 @@
 import { closeSync, openSync, readSync } from 'node:fs'
 import type { TranscriptSegment } from '@shared/types'
 import { SAMPLE_RATE, type Track } from './recorder'
+import type { Hold } from './live'
 import { addSpeech, BATCH_THREADS, detectSpeech, takeChunk, transcribeChunk, type Chunk, type Span } from './speech'
 
 const SILENCE_RMS = 120 // int16 RMS; below this a segment is near-silent
@@ -68,17 +69,25 @@ export function finalize(tracks: Array<{ track: Track; file: string }>, segs: Tr
   return removeEcho(kept.sort((a, b) => a.start - b.start))
 }
 
-/** Transcribes finished recordings in one go: used after a call when live transcription was off, and on Retry. */
+/**
+ * Transcribes finished recordings in one go: used after a call when live
+ * transcription was off, and on Retry. It's always background work: `threads`
+ * is asked again for every chunk and `hold` waited on, so a call that starts
+ * meanwhile goes first.
+ */
 export async function transcribe(
   tracks: Array<{ track: Track; file: string }>,
   prompt: string,
   onProgress: (p: number) => void,
-  threads = BATCH_THREADS
+  threads: number | (() => number) = BATCH_THREADS,
+  hold?: Hold
 ): Promise<TranscriptSegment[]> {
+  const threadsNow = typeof threads === 'number' ? () => threads : threads
   const jobs: Array<{ track: Track; file: string; chunk: Chunk }> = []
   for (const t of tracks) {
     const queue: Span[] = []
-    addSpeech(queue, await detectSpeech(t.file))
+    await hold?.wait()
+    addSpeech(queue, await detectSpeech(t.file, undefined, { background: true, lowest: !!hold?.lowest() }))
     for (let c = takeChunk(queue, true); c; c = takeChunk(queue, true)) jobs.push({ ...t, chunk: c })
   }
   const segs: TranscriptSegment[] = []
@@ -86,7 +95,9 @@ export async function transcribe(
   for (let i = 0; i < jobs.length; i++) {
     const { track, file, chunk } = jobs[i]
     const tmp = file.replace(/\.wav$/, `-chunk${i}`)
-    segs.push(...(await transcribeChunk(file, chunk, speakerOf(track), { prompt, threads }, tmp)))
+    await hold?.wait()
+    const opts = { prompt, threads: threadsNow(), background: true, lowest: !!hold?.lowest() }
+    segs.push(...(await transcribeChunk(file, chunk, speakerOf(track), opts, tmp)))
     onProgress((i + 1) / jobs.length)
   }
   return finalize(tracks, segs)

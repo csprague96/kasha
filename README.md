@@ -14,6 +14,7 @@ Meeting notes for Windows. Kasha notices when a Teams, Slack, RingCentral or Zoo
    - **Screenshot** opens the Windows snipping overlay; the image is added to the note.
    - **Stop** ends the recording. Kasha also stops on its own about 20 seconds after the call app releases the mic.
 4. Kasha transcribes during the call, a minute or so behind, so the **Transcript** tab fills in as you talk. When the call ends it finishes the last few seconds and summarizes in the background. The note gets Summary, Decisions and Actions sections above your own notes, and then syncs to Obsidian.
+5. You can record the next call while the last one is still being finished. The new call comes first: its live transcript runs ahead of the earlier note, which carries on more slowly (fewer threads, lowest priority) and says **slower during the call**. To leave the PC entirely to the call, select **Pause** on the earlier note, or the bar's pause button (it pauses both). A pause lasts until you resume or the recording ends. Pausing while speakers are being told apart stops that step; it starts over on resume.
 
 Kasha updates itself: it checks the releases a few times a day, downloads a new version in the background, and the sidebar shows **Restart to update** when it's ready (it also installs on the next quit, but never while a call is being recorded or processed). The version is at the bottom of the sidebar; **Check for updates** is in Settings > General.
 
@@ -93,6 +94,7 @@ Tell people on the call when you're transcribing.
 - The prompt and the recording bar are created only when needed and destroyed afterwards.
 - Speech runs one chunk at a time at below-normal priority and exits after each, so no model stays loaded during the call. Speaker separation runs once per call in its own process and exits.
 - When free memory drops under 1 GB during a call, live transcription waits (it starts again above 1.4 GB) and the bar says **transcribing waits for memory**. Select the play button to transcribe anyway; the recording carries on either way, and anything held back is transcribed after the call.
+- An earlier note being finished during a call waits below the same line (**waiting for free memory**), so it doesn't add to the load on a PC that's short. Speaker separation (about 350 MB) isn't started while memory is low. **Carry on** on the note overrides it until the recording ends.
 
 ### When something goes wrong
 
