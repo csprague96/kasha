@@ -1,12 +1,13 @@
-import { Check, Pencil, Replace, X } from 'lucide-react'
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Check, ChevronDown, ChevronUp, Pencil, Replace, UserMinus, X } from 'lucide-react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { removeSpeaker, speakerTurns } from '@shared/speakers'
 import { countMatches, findPattern } from '@shared/text'
 import { speakerName, type Meeting, type SpeakerId, type TranscriptSegment } from '@shared/types'
 import { clock, cn } from '@/lib/utils'
 import { CorrectWord, wordAtPoint, type WordAt } from './CorrectWord'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
-import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from './ui/popover'
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 
 interface Props {
   meeting: Meeting
@@ -65,30 +66,72 @@ function nameChoices(id: SpeakerId, meeting: Meeting, typed: string): Array<{ na
   return (t ? out.filter((c) => key(c.name).includes(t)) : out).slice(0, 12)
 }
 
-function SpeakerChip({ id, meeting }: { id: SpeakerId; meeting: Meeting }) {
-  const [editing, setEditing] = useState(false)
+/**
+ * Names a speaker everywhere in the transcript: type a name, or pick one from
+ * Teams or the invite. Opens from the chip at the top or from any of their
+ * lines. It can also remove a speaker added by mistake, once the user says
+ * who said their lines.
+ */
+function NameSpeaker({
+  children,
+  ...props
+}: {
+  id: SpeakerId
+  meeting: Meeting
+  speakers: SpeakerId[]
+  /** How many lines they said. */
+  lines: number
+  /** Gives all their lines to someone else. Undefined when they can't be removed. */
+  onRemove?: (into: SpeakerId) => void
+  /** Something they said, to tell who they are when their lines aren't in view. */
+  quote?: TranscriptSegment
+  /** The button that opens it. */
+  children: ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>{children}</PopoverTrigger>
+      {/* Mounted only while open, so every opening starts from the current name. */}
+      {open && <NameForm {...props} onClose={() => setOpen(false)} />}
+    </Popover>
+  )
+}
+
+function NameForm({
+  id,
+  meeting,
+  speakers,
+  lines,
+  onRemove,
+  quote,
+  onClose
+}: {
+  id: SpeakerId
+  meeting: Meeting
+  speakers: SpeakerId[]
+  lines: number
+  onRemove?: (into: SpeakerId) => void
+  quote?: TranscriptSegment
+  onClose: () => void
+}) {
   const name = speakerName(id, meeting.speakers)
   const given = meeting.speakers?.[id]?.trim() ?? ''
   const [value, setValue] = useState(given)
   const [active, setActive] = useState(-1) // highlighted choice, for the keyboard
+  const [removing, setRemoving] = useState(false)
   const listId = useId()
-  // One save per edit: Enter or a click closes the box, and a blur after that mustn't save again.
-  const saved = useRef(false)
-  useEffect(() => setValue(given), [given])
-  useEffect(() => {
-    if (editing) saved.current = false
-  }, [editing])
+  // One save per opening: Enter, a pick or a click elsewhere ends it, and nothing after that may save again.
+  const done = useRef(false)
 
   /**
    * Saves a name. A guess is only confirmed (and its voice learned) by an
    * explicit choice: picking the guessed name in the list, or the ✓ button.
-   * Leaving the box, or Enter, with the name unchanged is just a cancel.
+   * Closing it, or Enter, with the name unchanged is just a cancel.
    */
   const save = (v: string, picked = false) => {
-    if (saved.current) return
-    saved.current = true
-    setEditing(false)
-    setActive(-1)
+    if (done.current) return
+    done.current = true
     if (meeting.speakerGuesses?.[id] && v && v === given) {
       if (picked) void window.kasha.updateMeeting(meeting.id, { confirmSpeaker: id })
       return
@@ -99,14 +142,55 @@ function SpeakerChip({ id, meeting }: { id: SpeakerId; meeting: Meeting }) {
     else delete next[id]
     if ((next[id] ?? '') !== (meeting.speakers?.[id] ?? '')) void window.kasha.updateMeeting(meeting.id, { speakers: next })
   }
-  const commit = () => save(value.trim())
+  const close = (v: string, picked = false) => {
+    save(v, picked)
+    onClose()
+  }
 
-  if (editing) {
-    const choices = nameChoices(id, meeting, value === given ? '' : value)
-    const optionId = (i: number) => `${listId}-${i}`
-    return (
-      <Popover open>
-        <PopoverAnchor asChild>
+  const others = speakers.filter((s) => s !== id)
+  const choices = nameChoices(id, meeting, value === given ? '' : value)
+  const optionId = (i: number) => `${listId}-${i}`
+  const row = 'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-sidebar focus-visible:bg-sidebar focus-visible:outline-none'
+
+  return (
+    <PopoverContent
+      align="start"
+      className="w-64"
+      // Escape leaves the name as it was.
+      onEscapeKeyDown={() => (done.current = true)}
+      // A click elsewhere keeps what was typed, like leaving a text box. Popover closes itself.
+      onInteractOutside={() => !removing && save(value.trim())}
+    >
+      {removing && onRemove ? (
+        <>
+          <p className="px-2 pt-1 text-[13px] font-medium">Remove {name}</p>
+          <p className="px-2 pt-0.5 pb-1.5 text-xs text-muted">{lines === 1 ? 'Who said their line?' : `Who said their ${lines} lines?`}</p>
+          {others.map((o, i) => (
+            <button
+              key={o}
+              autoFocus={i === 0}
+              onClick={() => {
+                done.current = true
+                onClose()
+                onRemove(o)
+              }}
+              className={row}
+            >
+              {speakerName(o, meeting.speakers)}
+            </button>
+          ))}
+          <div className="my-1 border-t border-border" />
+          <button onClick={() => setRemoving(false)} className={cn(row, 'text-muted')}>
+            Back
+          </button>
+        </>
+      ) : (
+        <>
+          {quote && (
+            <p className="line-clamp-3 px-2 pt-1 pb-2 text-xs text-muted" title={quote.text}>
+              <span className="tabular mr-1.5 font-mono">{clock(quote.start)}</span>“{quote.text}”
+            </p>
+          )}
           <input
             autoFocus
             role="combobox"
@@ -120,7 +204,6 @@ function SpeakerChip({ id, meeting }: { id: SpeakerId; meeting: Meeting }) {
               setActive(-1)
             }}
             onFocus={(e) => e.currentTarget.select()}
-            onBlur={commit}
             onKeyDown={(e) => {
               if (e.key === 'ArrowDown' && choices.length) {
                 e.preventDefault()
@@ -130,31 +213,25 @@ function SpeakerChip({ id, meeting }: { id: SpeakerId; meeting: Meeting }) {
                 setActive((i) => (i <= 0 ? choices.length - 1 : i - 1))
               } else if (e.key === 'Enter') {
                 e.preventDefault()
-                if (active >= 0 && active < choices.length) save(choices[active].name, true)
-                else commit()
-              } else if (e.key === 'Escape') {
-                setValue(given)
-                setActive(-1)
-                setEditing(false)
+                if (active >= 0 && active < choices.length) close(choices[active].name, true)
+                else close(value.trim())
               }
             }}
             aria-label={`Name for ${name}`}
             placeholder={`Name for ${speakerName(id)}`}
-            className="h-7 w-48 rounded-md border border-primary bg-surface px-2 text-[13px] focus-visible:outline-offset-0"
+            className="h-8 w-full rounded-md border border-primary bg-background px-2 text-[13px] focus-visible:outline-offset-0"
           />
-        </PopoverAnchor>
-        {choices.length > 0 && (
-          <PopoverContent align="start" className="w-64 p-1" onOpenAutoFocus={(e) => e.preventDefault()}>
-            <ul id={listId} role="listbox" aria-label="Choose a name">
+          {choices.length > 0 && (
+            <ul id={listId} role="listbox" aria-label="Choose a name" className="mt-1 max-h-64 overflow-y-auto">
               {choices.map((c, i) => (
                 <li
                   key={c.name}
                   id={optionId(i)}
                   role="option"
                   aria-selected={i === active}
-                  // Keeps the typing box from saving first, on blur.
+                  // Keeps focus in the typing box.
                   onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => save(c.name, true)}
+                  onClick={() => close(c.name, true)}
                   onMouseEnter={() => setActive(i)}
                   className={cn(
                     'flex w-full cursor-default items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[13px]',
@@ -166,57 +243,104 @@ function SpeakerChip({ id, meeting }: { id: SpeakerId; meeting: Meeting }) {
                 </li>
               ))}
             </ul>
-          </PopoverContent>
-        )}
-      </Popover>
-    )
-  }
+          )}
+          {onRemove && others.length > 0 && (
+            <>
+              <div className="my-1 border-t border-border" />
+              <button
+                onClick={() => setRemoving(true)}
+                title="For a speaker added by mistake, or one person split in two"
+                className={cn(row, 'text-muted hover:text-foreground')}
+              >
+                <UserMinus className="size-3.5" />
+                Remove {name}
+              </button>
+            </>
+          )}
+        </>
+      )}
+    </PopoverContent>
+  )
+}
+
+/** A speaker at the top: the name shows where they spoke, the pencil names them. */
+function SpeakerChip({
+  id,
+  meeting,
+  speakers,
+  lines,
+  shown,
+  onShow,
+  onRemove,
+  quote
+}: {
+  id: SpeakerId
+  meeting: Meeting
+  speakers: SpeakerId[]
+  lines: number
+  /** Their lines are highlighted below. */
+  shown: boolean
+  onShow: () => void
+  onRemove?: (into: SpeakerId) => void
+  quote?: TranscriptSegment
+}) {
+  const name = speakerName(id, meeting.speakers)
+  // A guess (from Teams, a known voice or the conversation): a question until the user says yes or no.
   const guess = meeting.speakerGuesses?.[id]
-  if (guess) {
-    // A guess (from Teams, a known voice or the conversation): a question until the user says yes or no.
-    const clear = () => {
-      const next = { ...meeting.speakers }
-      delete next[id]
-      void window.kasha.updateMeeting(meeting.id, { speakers: next })
-    }
-    return (
-      <span className="inline-flex h-7 items-center rounded-md border border-dashed border-border bg-surface text-[13px]">
-        <button
-          onClick={() => setEditing(true)}
-          title={`${guess.evidence || 'A guess.'} Select to pick someone else.`}
-          className="inline-flex h-full items-center gap-1 rounded-l-md px-2 hover:bg-sidebar"
-        >
-          {name}
-          <span className="text-muted">?</span>
-        </button>
-        <button
-          onClick={() => void window.kasha.updateMeeting(meeting.id, { confirmSpeaker: id })}
-          aria-label={`Yes, this is ${name}`}
-          title={`Yes, this is ${name}`}
-          className="inline-flex h-full items-center border-l border-border px-1.5 hover:bg-sidebar"
-        >
-          <Check className="size-3.5 text-ok" />
-        </button>
-        <button
-          onClick={clear}
-          aria-label={`Not ${name}`}
-          title={`Not ${name}`}
-          className="inline-flex h-full items-center rounded-r-md border-l border-border px-1.5 hover:bg-sidebar"
-        >
-          <X className="size-3.5 text-muted" />
-        </button>
-      </span>
-    )
+  const part = 'inline-flex h-full items-center hover:bg-sidebar'
+  const clear = () => {
+    const next = { ...meeting.speakers }
+    delete next[id]
+    void window.kasha.updateMeeting(meeting.id, { speakers: next })
   }
+  const where = shown ? `Show the next time ${name} spoke` : `Show where ${name} spoke`
   return (
-    <button
-      onClick={() => setEditing(true)}
-      title="Rename everywhere in this transcript"
-      className="group inline-flex h-7 items-center gap-1.5 rounded-md border border-border bg-surface px-2 text-[13px] hover:bg-sidebar"
+    <span
+      className={cn(
+        'inline-flex h-7 items-center rounded-md border bg-surface text-[13px]',
+        guess && 'border-dashed',
+        shown ? 'border-primary' : 'border-border'
+      )}
     >
-      {name}
-      <Pencil className="size-3 text-muted opacity-60 group-hover:opacity-100" />
-    </button>
+      <button
+        onClick={onShow}
+        aria-pressed={shown}
+        title={guess ? `${guess.evidence || 'A guess.'} ${where}.` : where}
+        className={cn(part, 'rounded-l-md pr-1 pl-2', shown && 'bg-primary/10 hover:bg-primary/15')}
+      >
+        {name}
+        {guess && <span className="text-muted">?</span>}
+      </button>
+      <NameSpeaker id={id} meeting={meeting} speakers={speakers} lines={lines} onRemove={onRemove} quote={quote}>
+        <button
+          aria-label={`Rename ${name}`}
+          title={guess ? 'Pick someone else' : 'Rename everywhere in this transcript'}
+          className={cn(part, 'px-1.5 data-[state=open]:bg-sidebar', !guess && 'rounded-r-md')}
+        >
+          <Pencil className="size-3 text-muted" />
+        </button>
+      </NameSpeaker>
+      {guess && (
+        <>
+          <button
+            onClick={() => void window.kasha.updateMeeting(meeting.id, { confirmSpeaker: id })}
+            aria-label={`Yes, this is ${name}`}
+            title={`Yes, this is ${name}`}
+            className={cn(part, 'border-l border-border px-1.5')}
+          >
+            <Check className="size-3.5 text-ok" />
+          </button>
+          <button
+            onClick={clear}
+            aria-label={`Not ${name}`}
+            title={`Not ${name}`}
+            className={cn(part, 'rounded-r-md border-l border-border px-1.5')}
+          >
+            <X className="size-3.5 text-muted" />
+          </button>
+        </>
+      )}
+    </span>
   )
 }
 
@@ -244,7 +368,7 @@ function SpeakerPicker({
   )
   // Continuation lines hide the name until hovered, so turns are easy to scan.
   const visibility = show ? '' : 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100'
-  if (!onPick) return <span className={cn('self-start pt-[1px] text-[13px]', visibility)}>{label}</span>
+  if (!onPick) return <span className={cn('min-w-0 self-start pt-[1px] text-[13px]', visibility)}>{label}</span>
   const next = Math.max(0, ...speakers.map((s) => (s.startsWith('s') ? Number(s.slice(1)) : 0))) + 1
   const pick = (id: SpeakerId) => {
     setOpen(false)
@@ -535,6 +659,10 @@ export function Transcript({ meeting, segments, note, live, liveEnabled, onSave,
   const [correct, setCorrect] = useState<WordAt | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [change, setChange] = useState<{ from: string; to: string } | null>(null)
+  // A speaker whose lines are highlighted, and which of their turns is in view.
+  const [shown, setShown] = useState<{ id: SpeakerId; turn: number } | null>(null)
+  const [stuck, setStuck] = useState(false)
+  const list = useRef<HTMLOListElement>(null)
   const end = useStickToBottom(segments.length, live)
 
   useEffect(() => {
@@ -553,6 +681,45 @@ export function Transcript({ meeting, segments, note, live, liveEnabled, onSave,
     // You first, then everyone else in the order they spoke.
     return seen.sort((a, b) => Number(b === 'you') - Number(a === 'you'))
   }, [segments])
+  // How many lines each speaker said, and their longest: the likeliest to tell who they are.
+  const [lineCount, longest] = useMemo(() => {
+    const n: Partial<Record<SpeakerId, number>> = {}
+    const long: Partial<Record<SpeakerId, TranscriptSegment>> = {}
+    for (const s of segments) {
+      n[s.speaker] = (n[s.speaker] ?? 0) + 1
+      if (s.text.length > (long[s.speaker]?.text.length ?? -1)) long[s.speaker] = s
+    }
+    return [n, long]
+  }, [segments])
+
+  const shownId = shown?.id
+  const turns = useMemo(() => (shownId ? speakerTurns(segments, shownId) : []), [segments, shownId])
+  const turn = shown && turns.length ? Math.min(shown.turn, turns.length - 1) : -1
+  // The lines of the turn in view.
+  const from = turn >= 0 ? turns[turn] : -1
+  let to = from
+  while (from >= 0 && to + 1 < segments.length && segments[to + 1].speaker === shownId) to++
+
+  // Their last line went to someone else.
+  useEffect(() => {
+    if (shownId && !turns.length) setShown(null)
+  }, [shownId, turns.length])
+
+  // Brings the turn into view when the user asks for it. Edits that shift the lines don't move the page.
+  useEffect(() => {
+    if (!shown || from < 0) return
+    const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    list.current?.querySelector(`[data-line="${from}"]`)?.scrollIntoView({ block: 'center', behavior: still ? 'auto' : 'smooth' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shown])
+
+  // The speakers bar stays at the top while the lines scroll: a rule under it once they pass beneath.
+  const top = useCallback((el: HTMLDivElement | null) => {
+    if (!el) return
+    const io = new IntersectionObserver(([e]) => setStuck(!e.isIntersecting))
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -584,27 +751,87 @@ export function Transcript({ meeting, segments, note, live, liveEnabled, onSave,
     onSave?.(segments.map((s, j) => (j === i ? { ...s, ...patch } : s)))
   }
 
+  // Click a name: their first turn. Again: the next one.
+  const show = (id: SpeakerId) => setShown(shownId === id && turns.length ? { id, turn: (turn + 1) % turns.length } : { id, turn: 0 })
+  const step = (by: number) => {
+    if (shownId && turns.length) setShown({ id: shownId, turn: (turn + by + turns.length) % turns.length })
+  }
+
+  // You is the mic, always the user. And someone has to be left to take the lines.
+  const removable = (id: SpeakerId) =>
+    onSave && id !== 'you' && speakers.length > 1
+      ? (into: SpeakerId) => {
+          const n = lineCount[id] ?? 0
+          const whose = into === 'you' ? 'yours' : `${speakerName(into, meeting.speakers)}’s`
+          onSave(removeSpeaker(segments, id, into))
+          setNotice(`Removed ${speakerName(id, meeting.speakers)}. ${n === 1 ? 'Their line is' : `Their ${n} lines are`} now ${whose}.`)
+        }
+      : undefined
+
+  const shownName = shownId ? speakerName(shownId, meeting.speakers) : ''
+  // What the shown speaker said in the turn in view, or else anyone's longest line.
+  let inView: TranscriptSegment | undefined
+  for (let i = from; i >= 0 && i <= to; i++) if (!inView || segments[i].text.length > inView.text.length) inView = segments[i]
+  const quote = (id: SpeakerId) => (id === 'you' ? undefined : id === shownId && inView ? inView : longest[id])
+  const nameProps = (id: SpeakerId) => ({ id, meeting, speakers, lines: lineCount[id] ?? 0, onRemove: removable(id) })
+
   return (
-    <div className="flex max-w-[80ch] flex-col gap-5">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="mr-1 text-xs text-muted">Speakers</span>
-        {speakers.map((id) => (
-          <SpeakerChip key={id} id={id} meeting={meeting} />
-        ))}
-        {!finding && (
-          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setFinding(true)} title="Find and replace (Ctrl+H)">
-            <Replace />
-            Find and replace
-          </Button>
+    <div className="relative flex max-w-[80ch] flex-col gap-5">
+      <div ref={top} className="absolute -top-2 h-px w-px" aria-hidden="true" />
+      <div
+        className={cn(
+          'sticky top-0 z-10 -mx-2 -my-2 flex flex-col gap-2 bg-background px-2 py-2 transition-shadow duration-150',
+          stuck && 'shadow-[0_1px_0_var(--border)]'
+        )}
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="mr-1 text-xs text-muted">Speakers</span>
+          {speakers.map((id) => (
+            <SpeakerChip key={id} {...nameProps(id)} quote={quote(id)} shown={shownId === id} onShow={() => show(id)} />
+          ))}
+          {!finding && (
+            <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setFinding(true)} title="Find and replace (Ctrl+H)">
+              <Replace />
+              Find and replace
+            </Button>
+          )}
+        </div>
+
+        {shownId && turn >= 0 && (
+          <div className="flex flex-wrap items-center gap-1 text-[13px] text-muted">
+            {turns.length > 1 && (
+              <>
+                <Button variant="ghost" size="icon" className="size-7" onClick={() => step(-1)} aria-label={`Previous time ${shownName} spoke`} title="Previous">
+                  <ChevronUp />
+                </Button>
+                <Button variant="ghost" size="icon" className="size-7" onClick={() => step(1)} aria-label={`Next time ${shownName} spoke`} title="Next">
+                  <ChevronDown />
+                </Button>
+              </>
+            )}
+            <span className="tabular mx-1" role="status">
+              {turns.length > 1 ? `${turn + 1} of ${turns.length} times ${shownName} spoke` : `${shownName} spoke once`}
+            </span>
+            <NameSpeaker {...nameProps(shownId)} quote={quote(shownId)}>
+              <Button variant="ghost" size="sm" className="h-7 px-2 text-primary [&_svg]:size-3.5">
+                <Pencil />
+                {shownId === 'you' || meeting.speakers?.[shownId]?.trim() ? 'Rename' : 'Name them'}
+              </Button>
+            </NameSpeaker>
+            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setShown(null)}>
+              Done
+            </Button>
+          </div>
+        )}
+
+        {change && <RememberFix change={change} onClose={() => setChange(null)} />}
+        {notice && (
+          <p className="text-[13px] text-muted" role="status">
+            {notice}
+          </p>
         )}
       </div>
 
-      {change && <RememberFix change={change} onClose={() => setChange(null)} />}
-      {notice && (
-        <p className="-mt-2 text-[13px] text-muted" role="status">
-          {notice}
-        </p>
-      )}
       {correct && (
         <CorrectWord
           meetingId={meeting.id}
@@ -644,19 +871,44 @@ export function Transcript({ meeting, segments, note, live, liveEnabled, onSave,
         />
       )}
 
-      <ol className="flex flex-col gap-3">
+      <ol ref={list} className="flex flex-col gap-3">
         {segments.map((s, i) => {
-          const turn = i === 0 || segments[i - 1].speaker !== s.speaker
+          const turnStart = i === 0 || segments[i - 1].speaker !== s.speaker
+          const turnEnd = i === segments.length - 1 || segments[i + 1].speaker !== s.speaker
+          const mine = shownId === s.speaker
+          const name = speakerName(s.speaker, meeting.speakers)
           return (
-            <li key={`${s.start}-${i}`} className={cn('group grid grid-cols-[52px_112px_1fr] gap-2 leading-relaxed', turn && i > 0 && 'mt-2')}>
+            <li
+              key={`${s.start}-${i}`}
+              data-line={i}
+              // The padding lets a highlighted turn read as one block; the margins take it back out of the spacing.
+              className={cn(
+                'group -mx-2 -mb-1.5 grid grid-cols-[52px_112px_1fr] gap-2 px-2 py-1.5 leading-relaxed transition-colors duration-200',
+                turnStart && i > 0 ? 'mt-0.5' : '-mt-1.5',
+                mine && (i >= from && i <= to ? 'bg-primary/10' : 'bg-primary/[0.04]'),
+                mine && turnStart && 'rounded-t-md',
+                mine && turnEnd && 'rounded-b-md'
+              )}
+            >
               <span className="tabular pt-[3px] font-mono text-xs text-muted">{clock(s.start)}</span>
-              <SpeakerPicker
-                seg={s}
-                meeting={meeting}
-                speakers={speakers}
-                show={turn}
-                onPick={onSave && ((speaker) => edit(i, { speaker }))}
-              />
+              <div className="flex min-w-0 items-start gap-0.5">
+                <SpeakerPicker
+                  seg={s}
+                  meeting={meeting}
+                  speakers={speakers}
+                  show={turnStart}
+                  onPick={onSave && ((speaker) => edit(i, { speaker }))}
+                />
+                <NameSpeaker {...nameProps(s.speaker)}>
+                  <button
+                    aria-label={`Rename ${name}`}
+                    title={`Rename ${name} everywhere in this transcript`}
+                    className="mt-[3px] shrink-0 rounded p-0.5 text-muted opacity-0 group-hover:opacity-100 hover:bg-foreground/5 hover:text-foreground focus-visible:opacity-100 data-[state=open]:opacity-100"
+                  >
+                    <Pencil className="size-3" />
+                  </button>
+                </NameSpeaker>
+              </div>
               <LineText text={s.text} re={re} onSave={onSave && ((text) => edit(i, { text }))} onCorrect={setCorrect} />
             </li>
           )
