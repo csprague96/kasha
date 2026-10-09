@@ -247,6 +247,20 @@ export function syncVoices(meetingId: string, before: Meeting['speakers'], after
   }
 }
 
+/**
+ * Speakers left with no lines (removed, or every line given to someone
+ * else): what their voice taught is forgotten, and their voiceprint goes, so
+ * a speaker added later under the same number doesn't inherit it.
+ */
+export function forgetSpeakers(meetingId: string, ids: SpeakerId[]): void {
+  for (const id of ids) voices.unenroll(meetingId, id)
+  if (!existsSync(embeddingsFile(meetingId))) return
+  const prints = readEmbeddings(meetingId)
+  if (!ids.some((id) => prints.voices[id])) return
+  for (const id of ids) delete prints.voices[id]
+  writeFileSync(embeddingsFile(meetingId), JSON.stringify(prints))
+}
+
 /** Forgets a meeting's voiceprints and whatever was learned from them. */
 export function forgetMeetingVoices(meetingId: string): void {
   voices.unenrollMeeting(meetingId)

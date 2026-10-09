@@ -21,6 +21,7 @@ import { existsSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { freemem } from 'node:os'
 import { basename, join, normalize, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { goneSpeakers } from '@shared/speakers'
 import { countMatches, findPattern } from '@shared/text'
 import {
   GENERIC_TITLE,
@@ -55,7 +56,7 @@ import { takeScreenshot } from './screenshot'
 import { copyToClipboard, emailDraft, saveMarkdown, savePdf } from './share'
 import { redact } from './redact'
 import { downloadSpeech, setupStatus, speakersReady, speechReady } from './setup'
-import { forgetMeetingVoices, syncVoices } from './speakers'
+import { forgetMeetingVoices, forgetSpeakers, syncVoices } from './speakers'
 import { whisperPrompt } from './speech'
 import * as store from './store'
 import { splitNote } from './summarizer'
@@ -794,7 +795,22 @@ function registerIpc(): void {
       .map((s) => ({ start: s.start, end: s.end, speaker: s.speaker, text: redact(s.text.slice(0, 5000)) }))
     store.writeTranscript(id, next)
     const moved = next.length !== before.length || next.some((s, i) => s.speaker !== before[i].speaker)
-    if (moved && hasSummary(id)) store.updateMeeting(id, { summaryOutdated: true })
+    const patch: Partial<Meeting> = {}
+    if (moved && hasSummary(id)) patch.summaryOutdated = true
+    // A speaker with no lines left is gone: their name, a guess at it, and their voice.
+    const gone = goneSpeakers(before, next)
+    if (gone.length) {
+      forgetSpeakers(id, gone)
+      const speakers = { ...m.speakers }
+      const guesses = { ...m.speakerGuesses }
+      for (const k of gone) {
+        delete speakers[k]
+        delete guesses[k]
+      }
+      patch.speakers = speakers
+      patch.speakerGuesses = guesses
+    }
+    if (Object.keys(patch).length) store.updateMeeting(id, patch)
     broadcast('meetings-changed')
   })
   handle('meetings:replace', (id: string, find: string, replacement: string, o: ReplaceOptions) => {
