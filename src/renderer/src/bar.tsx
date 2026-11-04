@@ -1,7 +1,8 @@
-import { Camera, Pause, PenLine, Play } from 'lucide-react'
+import { Camera, ChevronDown, ChevronUp, Minimize2, Pause, PenLine, Pin, Play } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import type { LiveState, RecordingInfo } from '@shared/types'
+import type { BarNote, BarView, LiveState, RecordingInfo } from '@shared/types'
+import { Logo } from './components/Logo'
 import { cn, timer } from './lib/utils'
 import './styles.css'
 
@@ -11,11 +12,22 @@ interface Capture {
   stop(): Promise<void>
 }
 
+/** Dev-only (KASHA_FAKE_CAPTURE): silence on both tracks, to check the bar without recording anything. */
+function fakeCapture(): Capture {
+  const t = window.setInterval(() => {
+    window.bar.sendChunk('mic', new Int16Array(8000).buffer)
+    window.bar.sendChunk('sys', new Int16Array(8000).buffer)
+  }, 500)
+  window.bar.captureStarted({ mic: true, sys: true })
+  return { stop: async () => window.clearInterval(t) }
+}
+
 /**
  * Captures the mic and the computer's audio output as two 16 kHz tracks in one
  * AudioContext, so both share a clock and their timestamps line up.
  */
 async function startCapture(): Promise<Capture> {
+  if (location.hash === '#fake-capture') return fakeCapture()
   const ctx = new AudioContext({ sampleRate: 16000 })
   await ctx.audioWorklet.addModule('./pcm-worklet.js')
 
@@ -93,22 +105,103 @@ async function startCapture(): Promise<Capture> {
 
 // ---------- UI ----------
 
+/**
+ * Quick notes, in a drawer that slides out of the bar. Each one goes into the
+ * meeting's note with the time into the call; the ones typed here so far are
+ * listed above the box.
+ */
+function NotesDrawer(props: {
+  notes: BarNote[]
+  draft: string
+  onDraft: (v: string) => void
+  onAdd: () => void
+  onHide: () => void
+  up: boolean
+  closing: boolean
+  onClosed: () => void
+}) {
+  const { notes, draft, up, closing } = props
+  const list = useRef<HTMLOListElement>(null)
+  const box = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    box.current?.focus()
+  }, [])
+  // The newest note in view. (Braces: scrollTo returns a promise, which isn't a cleanup.)
+  useEffect(() => {
+    list.current?.scrollTo({ top: list.current.scrollHeight })
+  }, [notes.length])
+  const motion = closing ? (up ? 'bar-drawer-out-up' : 'bar-drawer-out') : up ? 'bar-drawer-in-up' : 'bar-drawer-in'
+  return (
+    <section
+      aria-label="Quick notes"
+      onAnimationEnd={() => closing && props.onClosed()}
+      className={cn('flex min-h-0 flex-1 flex-col gap-2 rounded-2xl border border-border bg-surface p-3 text-[13px]', motion)}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-xs text-muted">Notes go into the meeting's note with the time</h2>
+        <button
+          onClick={props.onHide}
+          title="Hide notes (Esc)"
+          aria-label="Hide notes"
+          className="rounded p-0.5 text-muted hover:bg-sidebar hover:text-foreground"
+        >
+          {up ? <ChevronDown className="size-4" /> : <ChevronUp className="size-4" />}
+        </button>
+      </div>
+      <ol ref={list} className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
+        {notes.length === 0 ? (
+          <li className="text-muted">Nothing yet. Type below and press Enter.</li>
+        ) : (
+          notes.map((n, i) => (
+            <li key={i} className="flex gap-2 leading-5">
+              <span className="tabular shrink-0 font-mono text-xs leading-5 text-muted">{n.at}</span>
+              <span className="min-w-0 break-words whitespace-pre-wrap">{n.text}</span>
+            </li>
+          ))
+        )}
+      </ol>
+      <textarea
+        ref={box}
+        value={draft}
+        rows={2}
+        onChange={(e) => props.onDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            props.onAdd()
+          } else if (e.key === 'Escape') {
+            e.preventDefault()
+            props.onHide()
+          }
+        }}
+        placeholder="Type a note, press Enter"
+        aria-label="New note"
+        className="w-full shrink-0 resize-none rounded-lg border border-border bg-background px-2.5 py-1.5 leading-5 placeholder:text-muted focus-visible:outline-offset-0"
+      />
+    </section>
+  )
+}
+
 function Bar() {
   const [info, setInfo] = useState<RecordingInfo | null>(null)
   const [now, setNow] = useState(Date.now())
-  const [noting, setNoting] = useState(false)
-  const [text, setText] = useState('')
-  const [flash, setFlash] = useState<string | null>(null)
   const [snipping, setSnipping] = useState(false)
   const [live, setLive] = useState<LiveState | null>(null)
+  const [view, setView] = useState<BarView | null>(null)
+  const [notes, setNotes] = useState<BarNote[]>([])
+  const [draft, setDraft] = useState('')
+  const [closing, setClosing] = useState(false)
   const capture = useRef<Promise<Capture> | null>(null)
 
   useEffect(() => {
     void window.bar.info().then(setInfo)
     void window.bar.live().then(setLive)
-    const offLive = window.bar.onLiveState(setLive)
+    void window.bar.view().then(setView)
+    void window.bar.notes().then(setNotes)
+    const offs = [window.bar.onLiveState(setLive), window.bar.onView(setView)]
     capture.current = startCapture()
-    const t = window.setInterval(() => setNow(Date.now()), 1000)
+    // Twice a second: the timer, and the minimized logo's sound bars.
+    const t = window.setInterval(() => setNow(Date.now()), 500)
     const off = window.bar.onStopRequested(async () => {
       try {
         await (await capture.current)?.stop()
@@ -119,27 +212,28 @@ function Bar() {
     return () => {
       window.clearInterval(t)
       off()
-      offLive()
+      offs.forEach((o) => o())
     }
   }, [])
 
-  const showFlash = (msg: string) => {
-    setFlash(msg)
-    window.setTimeout(() => setFlash(null), 1500)
+  const addNote = async () => {
+    const v = draft.trim()
+    if (!v) return
+    setDraft('')
+    setNotes(await window.bar.addNote(v))
   }
 
-  // Enter and Escape both just blur; blur saves unless the note was cancelled.
-  const cancelled = useRef(false)
-  const onNoteBlur = async () => {
-    const v = text.trim()
-    setNoting(false)
-    setText('')
-    if (cancelled.current || !v) {
-      cancelled.current = false
-      return
-    }
-    await window.bar.addNote(v)
-    showFlash('Note added')
+  // The drawer slides away first; the window shrinks once it's gone.
+  const closed = useRef<number | undefined>(undefined)
+  const hideNotes = () => {
+    if (closing) return
+    setClosing(true)
+    closed.current = window.setTimeout(finishHiding, 300) // in case the animation doesn't run
+  }
+  const finishHiding = () => {
+    window.clearTimeout(closed.current)
+    setClosing(false)
+    void window.bar.setView({ notes: false })
   }
 
   const screenshot = async () => {
@@ -151,47 +245,62 @@ function Bar() {
     }
   }
 
-  if (!info) return null
-  const pill = 'rounded-full border border-border px-2.5 py-1 font-medium [-webkit-app-region:no-drag]'
+  const stop = async () => {
+    // A note still in the box goes in before the recording ends.
+    if (draft.trim()) await addNote()
+    window.bar.stop()
+  }
+
+  if (!info || !view) return null
+  const elapsed = timer(now - info.startedAt)
   const paused = live?.paused ?? null
+
+  if (view.minimized && !view.expanded && !view.notes) {
+    const label = `Recording, ${elapsed}${paused ? ', transcribing paused' : ''}. Point at it to open the bar.`
+    return (
+      <div className="flex h-full items-center justify-center p-1">
+        <button
+          onClick={() => void window.bar.setView({ expanded: true })}
+          title={label}
+          aria-label={label}
+          className="bar-pop relative flex size-10 items-center justify-center rounded-full border border-border bg-surface"
+        >
+          <Logo size={17} beat={Math.floor(now / 500)} />
+          <span className="absolute top-0.5 right-0.5 size-2 rounded-full bg-record ring-2 ring-surface" aria-hidden="true" />
+        </button>
+      </div>
+    )
+  }
+
+  const pill = 'rounded-full border border-border px-2.5 py-1 font-medium [-webkit-app-region:no-drag]'
   const pauseLabel =
     paused === 'user'
       ? 'Resume transcribing'
       : paused === 'memory'
         ? 'Transcribing is waiting for free memory. Select to transcribe now anyway (the PC may slow down). Recording carries on either way.'
         : 'Pause transcribing, and finishing any earlier note. Recording carries on; transcripts catch up later.'
+  const sizeLabel = view.minimized ? 'Keep the bar open' : 'Minimize to the logo. Point at the logo to open the bar again.'
 
   return (
-    <div className="flex h-full items-center p-1">
-      <div className="flex h-full w-full items-center gap-3 rounded-full border border-border bg-surface py-1.5 pr-2 pl-3.5 text-[13px] [-webkit-app-region:drag]">
-        <span className="size-2 shrink-0 rounded-full bg-record" aria-hidden="true" />
-        <span className="tabular shrink-0 font-mono text-xs font-medium">{timer(now - info.startedAt)}</span>
-
-        {noting ? (
-          <input
-            autoFocus
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') cancelled.current = true
-              if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur()
-            }}
-            onBlur={() => void onNoteBlur()}
-            placeholder="Type a note, press Enter"
-            aria-label="Note"
-            className="h-7 min-w-0 flex-1 rounded-md bg-transparent px-1 placeholder:text-muted focus-visible:outline-offset-0 [-webkit-app-region:no-drag]"
-          />
-        ) : (
-          <button
-            onClick={() => window.bar.openMain()}
-            title="Open note"
-            className={cn('min-w-0 flex-1 truncate text-left [-webkit-app-region:no-drag]', flash && 'text-muted')}
-          >
-            {flash ?? info.title}
-            {!flash && paused === 'user' && <span className="text-muted"> · transcribing paused</span>}
-            {!flash && paused === 'memory' && <span className="text-muted"> · transcribing waits for memory</span>}
-          </button>
+    <div className={cn('flex h-full flex-col gap-1.5 p-1', view.up && 'flex-col-reverse')}>
+      <div
+        className={cn(
+          'flex h-12 w-full shrink-0 items-center gap-3 rounded-full border border-border bg-surface py-1.5 pr-1.5 pl-3.5 text-[13px] [-webkit-app-region:drag]',
+          view.minimized && 'bar-pop'
         )}
+      >
+        <span className="size-2 shrink-0 rounded-full bg-record" aria-hidden="true" />
+        <span className="tabular shrink-0 font-mono text-xs font-medium">{elapsed}</span>
+
+        <button
+          onClick={() => window.bar.openMain()}
+          title="Open note"
+          className="min-w-0 flex-1 truncate text-left [-webkit-app-region:no-drag]"
+        >
+          {info.title}
+          {paused === 'user' && <span className="text-muted"> · transcribing paused</span>}
+          {paused === 'memory' && <span className="text-muted"> · transcribing waits for memory</span>}
+        </button>
 
         {live?.available && (
           <button
@@ -205,7 +314,12 @@ function Bar() {
           </button>
         )}
 
-        <button className={cn(pill, 'inline-flex items-center gap-1.5 hover:bg-sidebar')} onClick={() => setNoting(true)}>
+        <button
+          className={cn(pill, 'inline-flex items-center gap-1.5 hover:bg-sidebar', view.notes && 'border-foreground bg-sidebar')}
+          onClick={() => (view.notes ? hideNotes() : void window.bar.setView({ notes: true }))}
+          aria-expanded={view.notes}
+          title={view.notes ? 'Hide notes' : 'Quick notes, added to the note with the time'}
+        >
           <PenLine className="size-3.5" />
           Note
         </button>
@@ -217,13 +331,31 @@ function Bar() {
           <Camera className="size-3.5" />
           Screenshot
         </button>
-        <button
-          className={cn(pill, 'border-foreground bg-foreground text-surface hover:opacity-90')}
-          onClick={() => window.bar.stop()}
-        >
+        <button className={cn(pill, 'border-foreground bg-foreground text-surface hover:opacity-90')} onClick={() => void stop()}>
           Stop
         </button>
+        <button
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted hover:bg-sidebar hover:text-foreground [-webkit-app-region:no-drag]"
+          onClick={() => void window.bar.setView({ minimized: !view.minimized })}
+          title={sizeLabel}
+          aria-label={sizeLabel}
+        >
+          {view.minimized ? <Pin className="size-3.5" /> : <Minimize2 className="size-3.5" />}
+        </button>
       </div>
+
+      {view.notes && (
+        <NotesDrawer
+          notes={notes}
+          draft={draft}
+          onDraft={setDraft}
+          onAdd={() => void addNote()}
+          onHide={hideNotes}
+          up={view.up}
+          closing={closing}
+          onClosed={finishHiding}
+        />
+      )}
     </div>
   )
 }

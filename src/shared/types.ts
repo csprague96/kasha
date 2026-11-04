@@ -165,6 +165,8 @@ export interface Settings {
   myName: string
   /** Transcribe in small pieces during the call instead of all at once afterwards. */
   liveTranscription: boolean
+  /** The recording bar starts shrunk to the logo (the bar's own Minimize button sets it). */
+  barMinimized: boolean
   speakers: {
     /** Split "Others" into Speaker 1, Speaker 2… from the computer's audio after the call. */
     separate: boolean
@@ -229,6 +231,7 @@ export const DEFAULT_SETTINGS: Settings = {
   summaryEngine: 'auto',
   myName: '',
   liveTranscription: true,
+  barMinimized: false,
   speakers: { separate: true, recognize: true, fromTeams: true },
   vocabulary: [],
   tags: { defaults: [], fromSummary: true },
@@ -315,6 +318,24 @@ export interface RecordingInfo {
   meetingId: string
   title: string
   startedAt: number // epoch ms
+}
+
+/** How the recording bar is showing. */
+export interface BarView {
+  /** Shrunk to the logo. Remembered for the next recording. */
+  minimized: boolean
+  /** Minimized, but opened up while the pointer is over it. */
+  expanded: boolean
+  /** The notes drawer is out. */
+  notes: boolean
+  /** The drawer opens above the bar: there's no room for it below. */
+  up: boolean
+}
+
+/** A quick note typed in the bar during the call. */
+export interface BarNote {
+  at: string // "12:40", time into the call
+  text: string
 }
 
 /** A task line (`- [ ]`) in a meeting note. The note is the source of truth. */

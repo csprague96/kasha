@@ -1,5 +1,4 @@
-import { X } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ActionGroup, ActionItem } from '@shared/types'
 import { cn } from '@/lib/utils'
 import { Switch } from './ui/switch'
@@ -10,6 +9,47 @@ interface Props {
   onToggle: (item: ActionItem, done: boolean) => void
   /** Takes the line out of the note: it wasn't really an action. */
   onRemove: (item: ActionItem) => void
+}
+
+/** A deleted action can be brought back for this long before its line leaves the note. */
+const UNDO_MS = 5000
+
+const keyOf = (i: ActionItem) => `${i.meetingId}:${i.raw}`
+
+/** Deletes after a pause that Undo cancels. Leaving the view deletes straight away. */
+function useDelayedRemove(onRemove: Props['onRemove']) {
+  const pending = useRef(new Map<string, { item: ActionItem; timer: number }>())
+  const removeRef = useRef(onRemove)
+  removeRef.current = onRemove
+  const [, rerender] = useState(0)
+  const forget = (key: string) => {
+    window.clearTimeout(pending.current.get(key)?.timer)
+    pending.current.delete(key)
+    rerender((n) => n + 1)
+  }
+  useEffect(
+    () => () => {
+      for (const p of pending.current.values()) {
+        window.clearTimeout(p.timer)
+        removeRef.current(p.item)
+      }
+      pending.current.clear()
+    },
+    []
+  )
+  return {
+    isDeleted: (item: ActionItem) => pending.current.has(keyOf(item)),
+    remove: (item: ActionItem) => {
+      const key = keyOf(item)
+      const timer = window.setTimeout(() => {
+        forget(key)
+        removeRef.current(item)
+      }, UNDO_MS)
+      pending.current.set(key, { item, timer })
+      rerender((n) => n + 1)
+    },
+    undo: (item: ActionItem) => forget(keyOf(item))
+  }
 }
 
 function todayIso(): string {
@@ -33,7 +73,25 @@ function Due({ item }: { item: ActionItem }) {
   return item.dueText ? <span className="text-muted">{item.dueText}</span> : null
 }
 
-function Row({ item, onToggle, onRemove }: { item: ActionItem; onToggle: Props['onToggle']; onRemove: Props['onRemove'] }) {
+interface RowProps {
+  item: ActionItem
+  deleted: boolean
+  onToggle: Props['onToggle']
+  onRemove: Props['onRemove']
+  onUndo: Props['onRemove']
+}
+
+function Row({ item, deleted, onToggle, onRemove, onUndo }: RowProps) {
+  if (deleted) {
+    return (
+      <li className="-mx-2 flex items-baseline gap-3 rounded-md px-2 py-1.5 text-[13px] text-muted" role="status">
+        <span className="min-w-0 truncate">Deleted “{item.text}”</span>
+        <button onClick={() => onUndo(item)} className="shrink-0 rounded font-medium text-primary hover:underline">
+          Undo
+        </button>
+      </li>
+    )
+  }
   return (
     <li className="group -mx-2 flex items-start gap-3 rounded-md px-2 py-1.5 hover:bg-foreground/[0.03]">
       <input
@@ -50,16 +108,16 @@ function Row({ item, onToggle, onRemove }: { item: ActionItem; onToggle: Props['
         <span className="tabular flex gap-3 text-xs">
           {!item.mine && item.owner && <span className="text-muted">{item.owner}</span>}
           <Due item={item} />
+          <button
+            onClick={() => onRemove(item)}
+            aria-label={`Delete “${item.text}”`}
+            title="Not needed? Takes the line out of the note."
+            className="rounded text-muted opacity-0 group-hover:opacity-100 hover:text-destructive hover:underline focus-visible:opacity-100"
+          >
+            Delete
+          </button>
         </span>
       </div>
-      <button
-        onClick={() => onRemove(item)}
-        aria-label={`Not an action: remove “${item.text}”`}
-        title="Not an action. Removes the line from the note."
-        className="mt-[2px] shrink-0 rounded p-0.5 text-muted opacity-0 group-hover:opacity-100 hover:bg-foreground/5 hover:text-foreground focus-visible:opacity-100"
-      >
-        <X className="size-3.5" />
-      </button>
     </li>
   )
 }
@@ -70,6 +128,10 @@ function Row({ item, onToggle, onRemove }: { item: ActionItem; onToggle: Props['
  */
 export function ActionsView({ groups, onOpenMeeting, onToggle, onRemove }: Props) {
   const [showDone, setShowDone] = useState(false)
+  const removal = useDelayedRemove(onRemove)
+  const row = (i: ActionItem) => (
+    <Row key={`${i.index}-${i.raw}`} item={i} deleted={removal.isDeleted(i)} onToggle={onToggle} onRemove={removal.remove} onUndo={removal.undo} />
+  )
 
   const visible = groups
     .map((g) => {
@@ -109,21 +171,11 @@ export function ActionsView({ groups, onOpenMeeting, onToggle, onRemove }: Props
               })}
             </span>
           </button>
-          {g.mine.length > 0 && (
-            <ul className="flex flex-col">
-              {g.mine.map((i) => (
-                <Row key={`${i.index}-${i.raw}`} item={i} onToggle={onToggle} onRemove={onRemove} />
-              ))}
-            </ul>
-          )}
+          {g.mine.length > 0 && <ul className="flex flex-col">{g.mine.map(row)}</ul>}
           {g.others.length > 0 && (
             <>
               <div className="pt-2 text-xs text-muted">Others</div>
-              <ul className="flex flex-col">
-                {g.others.map((i) => (
-                  <Row key={`${i.index}-${i.raw}`} item={i} onToggle={onToggle} onRemove={onRemove} />
-                ))}
-              </ul>
+              <ul className="flex flex-col">{g.others.map(row)}</ul>
             </>
           )}
         </section>

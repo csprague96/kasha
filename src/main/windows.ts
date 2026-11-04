@@ -1,5 +1,6 @@
 import { app, BrowserWindow, nativeImage, screen, shell } from 'electron'
 import { join } from 'node:path'
+import { BAR_HEIGHT, BAR_WIDTH } from './bar'
 
 const preload = join(__dirname, '../preload/index.js')
 
@@ -82,11 +83,11 @@ export function createToastWindow(height = 156): BrowserWindow {
   return win
 }
 
-/** Floating recording bar. Also hosts audio capture for the session. */
+/** Floating recording bar. Also hosts audio capture for the session. BarLayout places and sizes it. */
 export function createBarWindow(): BrowserWindow {
   const { workArea } = screen.getPrimaryDisplay()
-  const width = 600
-  const height = 56
+  const width = BAR_WIDTH
+  const height = BAR_HEIGHT
   const b = base()
   const win = new BrowserWindow({
     ...b,
@@ -106,8 +107,11 @@ export function createBarWindow(): BrowserWindow {
     webPreferences: { ...b.webPreferences, backgroundThrottling: false }
   })
   lockNavigation(win)
-  win.setAlwaysOnTop(true, 'floating')
+  // Not 'floating': on Windows, Electron tucks a floating window under the
+  // taskbar each time it's clicked, and it can lose always-on-top doing so.
+  win.setAlwaysOnTop(true, 'screen-saver')
   win.once('ready-to-show', () => win.showInactive())
-  load(win, 'bar')
+  // Dev-only: KASHA_FAKE_CAPTURE=1 records silence, for checking the bar without the mic or the computer's audio.
+  load(win, 'bar', !app.isPackaged && process.env.KASHA_FAKE_CAPTURE ? '#fake-capture' : '')
   return win
 }

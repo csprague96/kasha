@@ -41,12 +41,33 @@ const PARTS: Part[] = [
 
 const EASE = 'cubic-bezier(.34,1.56,.64,1)'
 
+/** While recording, the two sound bars step through these heights, like a slow level meter. */
+const LEVELS: Record<string, number[]> = {
+  pS: [1, 0.6, 0.85, 0.5, 0.95, 0.7],
+  pY: [0.65, 1, 0.55, 0.9, 0.6, 1]
+}
+
 /**
  * The K mark. With `animate` on, the bars pump from the bottom and the K's
  * arms open and close like jaws: the wordmark feeds it the name. Colours
  * swap between blue and gold as it goes.
+ *
+ * `beat` (a call is being recorded): a count that moves the sound bars on a
+ * step each time it changes. It's stepped from outside, not a CSS animation,
+ * because the recording bar is a transparent window: every animation frame
+ * redraws all of it, which cost about 15% of a core.
  */
-export function Logo({ size = 22, animate = false, className }: { size?: number; animate?: boolean; className?: string }) {
+export function Logo({
+  size = 22,
+  animate = false,
+  beat,
+  className
+}: {
+  size?: number
+  animate?: boolean
+  beat?: number
+  className?: string
+}) {
   const uid = useId().replace(/:/g, '')
   return (
     <svg
@@ -78,7 +99,8 @@ export function Logo({ size = 22, animate = false, className }: { size?: number;
           style={{
             transformBox: p.origin === 'bottom' ? 'fill-box' : 'view-box',
             transformOrigin: p.origin,
-            animation: animate && p.anim !== 'none' ? `${p.anim} ${EASE} both` : 'none'
+            animation: animate && p.anim !== 'none' ? `${p.anim} ${EASE} both` : 'none',
+            transform: beat !== undefined && LEVELS[p.k] ? `scaleY(${LEVELS[p.k][beat % LEVELS[p.k].length]})` : undefined
           }}
         />
       ))}
