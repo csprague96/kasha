@@ -159,7 +159,11 @@ export function run(exe: string, args: string[], input: string, cwd: string, tim
   })
 }
 
-async function runClaude(prompt: string): Promise<Summary> {
+/**
+ * Runs Claude Code once with no tools, settings or MCP servers: only the
+ * prompt goes in. With a schema, the reply is JSON in that shape.
+ */
+async function runClaude(system: string, prompt: string, schema?: object): Promise<string | object> {
   const exe = claudeExe()
   if (!exe) throw new AuthError('Claude Code is not installed.')
   const args = [
@@ -171,10 +175,10 @@ async function runClaude(prompt: string): Promise<Summary> {
     '--strict-mcp-config',
     '--disable-slash-commands',
     '--no-session-persistence',
-    '--system-prompt', SYSTEM
+    '--system-prompt', system
   ]
   // JSON on a cmd.exe command line gets mangled; the prompt alone is enough there.
-  if (!exe.endsWith('.cmd')) args.push('--json-schema', JSON.stringify(SCHEMA))
+  if (schema && !exe.endsWith('.cmd')) args.push('--json-schema', JSON.stringify(schema))
   const { stdout } = await run(exe, args, prompt, emptyDir('kasha-claude'))
   const envelope = JSON.parse(stdout)
   if (envelope.is_error) {
@@ -183,19 +187,20 @@ async function runClaude(prompt: string): Promise<Summary> {
     if (AUTH_ERROR.test(msg) && !/another claude code process/i.test(msg)) throw new AuthError(msg)
     throw new Error(msg)
   }
-  if (envelope.structured_output) return envelope.structured_output as Summary
-  return JSON.parse(String(envelope.result ?? '').replace(/^```(?:json)?\s*|\s*```$/g, '')) as Summary
+  if (schema && envelope.structured_output) return envelope.structured_output as object
+  return String(envelope.result ?? '')
 }
 
-async function runCodex(prompt: string): Promise<Summary> {
+/** Runs Codex once, read-only with its shell tool off. With a schema, the reply is JSON in that shape. */
+async function runCodex(system: string, prompt: string, schema?: object): Promise<string> {
   const exe = codexExe()
   if (!exe) throw new AuthError('Codex is not installed.')
   const dir = emptyDir('kasha-codex')
   const schemaFile = join(dir, 'schema.json')
   const outFile = join(dir, `out-${Date.now()}.json`)
-  writeFileSync(schemaFile, JSON.stringify(SCHEMA))
+  if (schema) writeFileSync(schemaFile, JSON.stringify(schema))
   // Codex is an agent: its shell tool is switched off and it runs read-only, so it
-  // only writes the summary. It has no system prompt flag, so the rules lead the prompt.
+  // only writes the reply. It has no system prompt flag, so the rules lead the prompt.
   const args = [
     'exec',
     '--skip-git-repo-check',
@@ -206,26 +211,29 @@ async function runCodex(prompt: string): Promise<Summary> {
     '-c', 'model_reasoning_effort="low"',
     '--color', 'never',
     '--cd', dir,
-    '--output-schema', schemaFile,
+    ...(schema ? ['--output-schema', schemaFile] : []),
     '--output-last-message', outFile,
     '-'
   ]
   try {
-    const input = `${SYSTEM}\n- Do not run commands or use tools. Reply with the JSON only.\n\n${prompt}`
+    const input = `${system}\n- Do not run commands or use tools.${schema ? ' Reply with the JSON only.' : ''}\n\n${prompt}`
     const { stderr } = await run(exe, args, input, dir)
     const text = existsSync(outFile) ? readFileSync(outFile, 'utf8').trim() : ''
     if (!text) {
-      const last = stderr.trim().split('\n').filter(Boolean).pop() ?? 'Codex returned no summary.'
+      const last = stderr.trim().split('\n').filter(Boolean).pop() ?? 'Codex returned nothing.'
       if (AUTH_ERROR.test(stderr)) throw new AuthError(last)
       throw new Error(last)
     }
-    return JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, '')) as Summary
+    return text
   } finally {
     rmSync(outFile, { force: true })
   }
 }
 
-const RUNNERS: Record<Engine, (prompt: string) => Promise<Summary>> = { claude: runClaude, codex: runCodex }
+/** One reply from an engine: JSON matching `schema`, or plain text without one. */
+function runEngine(engine: Engine, system: string, prompt: string, schema?: object): Promise<string | object> {
+  return engine === 'claude' ? runClaude(system, prompt, schema) : runCodex(system, prompt, schema)
+}
 
 /** Engines to try, in order. Automatic prefers Claude Code and falls back to Codex. */
 function engineOrder(choice: Settings['summaryEngine']): Engine[] {
@@ -234,11 +242,11 @@ function engineOrder(choice: Settings['summaryEngine']): Engine[] {
   return (['claude', 'codex'] as Engine[]).filter((e) => (e === 'claude' ? claudeExe() : codexExe()))
 }
 
-async function withRetries(engine: Engine, prompt: string): Promise<Summary> {
-  let lastErr: Error = new Error('Summary failed.')
+async function withRetries<T>(fn: () => Promise<T>): Promise<T> {
+  let lastErr: Error = new Error('The engine failed.')
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await RUNNERS[engine](prompt)
+      return await fn()
     } catch (e) {
       lastErr = e as Error
       if (lastErr instanceof AuthError || !TRANSIENT.test(lastErr.message)) break
@@ -248,45 +256,65 @@ async function withRetries(engine: Engine, prompt: string): Promise<Summary> {
   throw lastErr
 }
 
-export async function summarize(
-  ctx: SummaryContext,
-  notes: string,
-  transcript: TranscriptSegment[],
-  choice: Settings['summaryEngine'] = 'auto'
-): Promise<Summary & { engine: Engine }> {
+/**
+ * Tries the engines in order until one answers. Only a sign-in problem
+ * moves on to the next engine; other errors are reported as they are.
+ */
+async function firstEngine<T>(choice: Settings['summaryEngine'], fn: (engine: Engine) => Promise<T>, then: string): Promise<{ value: T; engine: Engine }> {
   const order = engineOrder(choice)
-  if (!order.length) {
-    throw new Error('No summary engine found. Install Claude Code or Codex and sign in, then select Retry.')
-  }
-  const prompt = buildPrompt(ctx, notes, transcript)
+  if (!order.length) throw new Error(`No summary engine found. Install Claude Code or Codex and sign in, then ${then}.`)
   let lastErr: Error | null = null
   for (const engine of order) {
     try {
-      const s = await withRetries(engine, prompt)
-      return {
-        engine,
-        title: s.title?.trim() || null,
-        summary: s.summary?.trim() ?? '',
-        decisions: s.decisions ?? [],
-        actions: (s.actions ?? []).map((a) => ({
-          ...a,
-          dueDate: a.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(a.dueDate) ? a.dueDate : null
-        })),
-        tags: (s.tags ?? []).map((t) => t.toLowerCase().replace(/^#/, '').replace(/\s+/g, '-')).slice(0, 3),
-        speakers: Array.isArray(s.speakers) ? s.speakers : []
-      }
+      return { value: await withRetries(() => fn(engine)), engine }
     } catch (e) {
       lastErr = e as Error
-      // Only a sign-in problem moves on to the next engine; other errors are reported as is.
       if (!(lastErr instanceof AuthError)) break
     }
   }
   if (lastErr instanceof AuthError) {
     const names = order.map((e) => ENGINE_NAME[e]).join(' or ')
     const how = order.map((e) => (e === 'claude' ? '"claude"' : '"codex login"')).join(' or ')
-    throw new Error(`${names} needs you to sign in. Run ${how} in a terminal, then select Retry.`)
+    throw new Error(`${names} needs you to sign in. Run ${how} in a terminal, then ${then}.`)
   }
-  throw lastErr ?? new Error('Summary failed.')
+  throw lastErr ?? new Error('The engine failed.')
+}
+
+const unfence = (t: string) => t.trim().replace(/^```(?:json|markdown|md|text)?\s*|\s*```$/g, '')
+
+export async function summarize(
+  ctx: SummaryContext,
+  notes: string,
+  transcript: TranscriptSegment[],
+  choice: Settings['summaryEngine'] = 'auto'
+): Promise<Summary & { engine: Engine }> {
+  const prompt = buildPrompt(ctx, notes, transcript)
+  const { value: s, engine } = await firstEngine(
+    choice,
+    async (e) => {
+      const out = await runEngine(e, SYSTEM, prompt, SCHEMA)
+      return (typeof out === 'string' ? JSON.parse(unfence(out)) : out) as Summary
+    },
+    'select Retry'
+  )
+  return {
+    engine,
+    title: s.title?.trim() || null,
+    summary: s.summary?.trim() ?? '',
+    decisions: s.decisions ?? [],
+    actions: (s.actions ?? []).map((a) => ({
+      ...a,
+      dueDate: a.dueDate && /^\d{4}-\d{2}-\d{2}$/.test(a.dueDate) ? a.dueDate : null
+    })),
+    tags: (s.tags ?? []).map((t) => t.toLowerCase().replace(/^#/, '').replace(/\s+/g, '-')).slice(0, 3),
+    speakers: Array.isArray(s.speakers) ? s.speakers : []
+  }
+}
+
+/** A plain-text reply to `prompt` under the `system` rules, from the first engine that's signed in. */
+export async function answer(system: string, prompt: string, choice: Settings['summaryEngine'] = 'auto'): Promise<{ text: string; engine: Engine }> {
+  const { value, engine } = await firstEngine(choice, async (e) => String(await runEngine(e, system, prompt)), 'ask again')
+  return { text: unfence(value), engine }
 }
 
 const normalize = (t: string) =>

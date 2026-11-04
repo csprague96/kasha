@@ -1,7 +1,8 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { closeSync, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AudioInfo } from '@shared/types'
 import { log } from './log'
+import { SAMPLE_RATE, wavHeader, type Track } from './recorder'
 import * as store from './store'
 
 /**
@@ -66,6 +67,36 @@ export function startAudioSweeper(onRemoved: () => void): void {
   const run = () => sweepAudio() && onRemoved()
   run()
   setInterval(run, SWEEP_EVERY_MS)
+}
+
+/** The longest stretch played at once: plenty to tell a voice, and never more than about a megabyte. */
+export const CLIP_MAX_SECONDS = 30
+const CLIP_LEAD = 0.15 // word timings can start a touch late
+const CLIP_TAIL = 0.3
+
+/**
+ * One line of the recording as a short WAV, to hear who said it: the mic for
+ * the note taker, the computer's audio for everyone else. Null when the
+ * recording is gone (deleted after the transcript, or after 7 days).
+ */
+export function audioClip(id: string, track: Track, start: number, end: number): Buffer | null {
+  const file = join(audioDir(id), `${track}.wav`)
+  if (!existsSync(file)) return null
+  const from = Math.max(0, start - CLIP_LEAD)
+  const to = Math.min(end + CLIP_TAIL, from + CLIP_MAX_SECONDS)
+  const fd = openSync(file, 'r')
+  try {
+    const size = fstatSync(fd).size
+    const first = 44 + Math.floor(from * SAMPLE_RATE) * 2
+    const last = Math.min(size, 44 + Math.ceil(to * SAMPLE_RATE) * 2)
+    const bytes = last - first - ((last - first) % 2)
+    if (bytes <= 0) return null
+    const pcm = Buffer.alloc(bytes)
+    readSync(fd, pcm, 0, bytes, first)
+    return Buffer.concat([wavHeader(bytes), pcm])
+  } finally {
+    closeSync(fd)
+  }
 }
 
 /** Copies the recording's tracks into `folder`, named after the meeting. Returns the files written. */

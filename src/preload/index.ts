@@ -14,6 +14,7 @@ const kasha: KashaApi = {
   getMeeting: (id) => invoke('meetings:get', id),
   saveAudio: (id) => invoke('meetings:saveAudio', id),
   deleteAudio: (id) => invoke('meetings:deleteAudio', id),
+  audioClip: (id, speaker, start, end) => invoke('meetings:audioClip', id, speaker, start, end),
   createNote: () => invoke('meetings:create'),
   updateMeeting: (id, patch) => invoke('meetings:update', id, patch),
   saveNote: (id, md) => invoke('meetings:saveNote', id, md),
@@ -26,6 +27,12 @@ const kasha: KashaApi = {
   retry: (id) => invoke('meetings:retry', id),
   syncNow: (id) => invoke('meetings:sync', id),
   revealInObsidian: (id) => invoke('meetings:reveal', id),
+
+  relatedNotes: (id) => invoke('ask:related', id),
+  findNotes: (id, query) => invoke('ask:find', id, query),
+  ask: (id, question, notes, history) => invoke('ask:ask', id, question, notes, history),
+  openNote: (key) => invoke('ask:open', key),
+  appendToNote: (id, md) => invoke('meetings:append', id, md),
 
   listActions: () => invoke('actions:list'),
   setActionDone: (id, index, raw, done) => invoke('actions:setDone', id, index, raw, done),

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { BarNote, BarView, LiveState, RecordingInfo } from '@shared/types'
 import { Logo } from './components/Logo'
+import { followTheme } from './lib/theme'
 import { cn, timer } from './lib/utils'
 import './styles.css'
 
@@ -361,5 +362,6 @@ function Bar() {
 }
 
 document.body.style.background = 'transparent'
+followTheme()
 // No StrictMode here: its double-run effects would start audio capture twice.
 createRoot(document.getElementById('root')!).render(<Bar />)

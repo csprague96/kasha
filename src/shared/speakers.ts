@@ -1,4 +1,21 @@
-import type { SpeakerId, TranscriptSegment } from './types'
+import { speakerName, type Meeting, type SpeakerId, type TranscriptSegment } from './types'
+
+/**
+ * Another speaker a name already belongs to: giving it to this speaker too
+ * says they're one person. Case and spacing don't matter. Guessed names
+ * don't count, they may be wrong.
+ */
+export function sameSpeaker(
+  id: SpeakerId,
+  m: Pick<Meeting, 'speakers' | 'speakerGuesses'>,
+  speakers: SpeakerId[],
+  name: string
+): SpeakerId | undefined {
+  const key = (n: string) => n.trim().replace(/\s+/g, ' ').toLowerCase()
+  const k = key(name)
+  if (!k) return undefined
+  return speakers.find((o) => o !== id && !m.speakerGuesses?.[o] && key(speakerName(o, m.speakers)) === k)
+}
 
 /** Where each of a speaker's turns starts: the first line of every run of lines they said. */
 export function speakerTurns(segs: TranscriptSegment[], id: SpeakerId): number[] {

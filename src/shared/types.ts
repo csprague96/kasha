@@ -153,6 +153,13 @@ export const SPEECH_MODELS: SpeechModelInfo[] = [
   }
 ]
 
+export type Theme = 'kasha' | 'pink'
+
+export const THEMES: Array<{ id: Theme; name: string; detail: string }> = [
+  { id: 'kasha', name: 'Kasha', detail: 'Warm paper with deep blue.' },
+  { id: 'pink', name: 'Pink', detail: 'Blush paper with rose.' }
+]
+
 export interface Settings {
   setupComplete: boolean
   launchAtLogin: boolean
@@ -167,6 +174,8 @@ export interface Settings {
   liveTranscription: boolean
   /** The recording bar starts shrunk to the logo (the bar's own Minimize button sets it). */
   barMinimized: boolean
+  /** Colours for every window. Each has a light and a dark version that follows Windows. */
+  theme: Theme
   speakers: {
     /** Split "Others" into Speaker 1, Speaker 2… from the computer's audio after the call. */
     separate: boolean
@@ -232,6 +241,7 @@ export const DEFAULT_SETTINGS: Settings = {
   myName: '',
   liveTranscription: true,
   barMinimized: false,
+  theme: 'kasha',
   speakers: { separate: true, recognize: true, fromTeams: true },
   vocabulary: [],
   tags: { defaults: [], fromSummary: true },
@@ -409,6 +419,31 @@ export interface AudioInfo {
 export interface AppInfo {
   version: string
   installed: boolean
+}
+
+/** A note in the Obsidian vault, or in Kasha, that may say more about a call's topic. */
+export interface RelatedNote {
+  /** A path inside the vault, or "kasha:<meeting id>" for a note that's only in Kasha. */
+  key: string
+  title: string
+  date: string | null // YYYY-MM-DD
+  /** Why it came up: "#billing", "Pat Lee was there", "Mentions chargebacks"… */
+  why: string[]
+  /** The Kasha note it came from, so it opens in Kasha. */
+  meetingId?: string
+}
+
+/** A question asked about a call (and the notes picked to go with it), and the answer. */
+export interface AskTurn {
+  question: string
+  answer: string
+}
+
+export interface AskAnswer {
+  answer: string
+  engine: 'claude' | 'codex'
+  /** The notes it was given, so citations like [[Title]] can be opened. */
+  sources: RelatedNote[]
 }
 
 export interface ReplaceOptions {

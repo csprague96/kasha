@@ -2,6 +2,7 @@ import { Download, ExternalLink, Loader2, Pause, Play, RefreshCw, X } from 'luci
 import { useEffect, useRef, useState } from 'react'
 import { normTag, type AudioInfo, type BackgroundState, type Meeting, type RecordingInfo, type Settings, type TranscriptSegment } from '@shared/types'
 import { cn, hhmm, meetingMeta, timer } from '@/lib/utils'
+import { Ask } from './Ask'
 import { Attendees } from './Attendees'
 import { CorrectWord, type WordAt } from './CorrectWord'
 import { DeleteNote } from './DeleteNote'
@@ -21,7 +22,9 @@ interface Props {
   allTags: string[]
 }
 
-type Tab = 'notes' | 'transcript' | 'attendees'
+type Tab = 'notes' | 'transcript' | 'attendees' | 'ask'
+
+const TAB_LABELS: Record<Tab, string> = { notes: 'Notes', transcript: 'Transcript', attendees: 'Attendees', ask: 'Ask' }
 
 function useNow(active: boolean): number {
   const [now, setNow] = useState(Date.now())
@@ -340,7 +343,7 @@ export function NoteView(props: Props) {
       </header>
 
       <div role="tablist" className="mt-5 flex gap-6 border-b border-border px-10 max-[820px]:px-6">
-        {(['notes', 'transcript', 'attendees'] as Tab[]).map((t) => (
+        {(Object.keys(TAB_LABELS) as Tab[]).map((t) => (
           <button
             key={t}
             role="tab"
@@ -351,7 +354,7 @@ export function NoteView(props: Props) {
               tab === t ? 'border-primary text-foreground' : 'border-transparent text-muted hover:text-foreground'
             )}
           >
-            {t === 'notes' ? 'Notes' : t === 'transcript' ? 'Transcript' : 'Attendees'}
+            {TAB_LABELS[t]}
           </button>
         ))}
       </div>
@@ -393,11 +396,14 @@ export function NoteView(props: Props) {
             liveEnabled={props.settings.liveTranscription}
             onSave={writing ? undefined : saveTranscript}
             onReplaced={reload}
+            audio={!!data.audio && meeting.status !== 'recording'}
+            keepAudio={props.settings.keepAudio}
           />
         )}
         {data && tab === 'attendees' && (
           <Attendees meeting={meeting} segments={data.transcript} settings={props.settings} onShowTranscript={() => setTab('transcript')} />
         )}
+        {data && tab === 'ask' && <Ask meeting={meeting} settings={props.settings} />}
       </div>
     </div>
   )

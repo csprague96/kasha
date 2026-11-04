@@ -1,6 +1,7 @@
 import { app, BrowserWindow, nativeImage, screen, shell } from 'electron'
 import { join } from 'node:path'
 import { BAR_HEIGHT, BAR_WIDTH } from './bar'
+import { getSettings } from './store'
 
 const preload = join(__dirname, '../preload/index.js')
 
@@ -15,10 +16,13 @@ export function appIcon(): Electron.NativeImage {
   return nativeImage.createFromPath(file)
 }
 
+/** The theme from Settings, in the page's address so its first paint is already in those colours. */
+const theme = () => (getSettings().theme === 'pink' ? 'pink' : 'kasha')
+
 function load(win: BrowserWindow, page: 'index' | 'toast' | 'bar', hash = ''): void {
   const devUrl = process.env['ELECTRON_RENDERER_URL']
-  if (devUrl) void win.loadURL(`${devUrl}/${page}.html${hash}`)
-  else void win.loadFile(join(__dirname, `../renderer/${page}.html`), { hash: hash.replace(/^#/, '') })
+  if (devUrl) void win.loadURL(`${devUrl}/${page}.html?theme=${theme()}${hash}`)
+  else void win.loadFile(join(__dirname, `../renderer/${page}.html`), { query: { theme: theme() }, hash: hash.replace(/^#/, '') })
 }
 
 const base = () => ({
@@ -47,7 +51,7 @@ export function createMainWindow(hash = ''): BrowserWindow {
     minWidth: 720,
     minHeight: 480,
     title: 'Kasha',
-    backgroundColor: '#F6F5F2'
+    backgroundColor: theme() === 'pink' ? '#FFF5FA' : '#F6F5F2'
   })
   lockNavigation(win)
   win.once('ready-to-show', () => win.show())
