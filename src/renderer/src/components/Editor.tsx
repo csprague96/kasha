@@ -21,6 +21,43 @@ interface Props {
 
 const SAVE_DELAY = 400
 
+/** Task lines (actions) get a Delete link after the text, for one that isn't needed. */
+const Task = TaskItem.extend({
+  addNodeView() {
+    const parent = this.parent?.()
+    if (!parent) return null
+    return (props) => {
+      const view = parent(props)
+      const del = document.createElement('button')
+      del.type = 'button'
+      del.contentEditable = 'false'
+      del.className = 'task-delete'
+      del.textContent = 'Delete'
+      del.title = 'Not needed? Takes the line out of the note.'
+      // Keep the caret where it is; the checkbox does the same.
+      del.addEventListener('mousedown', (e) => e.preventDefault())
+      del.addEventListener('click', () => {
+        const pos = typeof props.getPos === 'function' ? props.getPos() : undefined
+        if (typeof pos !== 'number' || !props.editor.isEditable) return
+        props.editor
+          .chain()
+          .command(({ tr }) => {
+            const node = tr.doc.nodeAt(pos)
+            if (!node) return false
+            const $pos = tr.doc.resolve(pos)
+            // The list's only line: the list goes too, rather than leaving an empty one.
+            if ($pos.parent.childCount === 1 && $pos.depth > 0) tr.delete($pos.before(), $pos.after())
+            else tr.delete(pos, pos + node.nodeSize)
+            return true
+          })
+          .run()
+      })
+      view.dom.append(del)
+      return view
+    }
+  }
+})
+
 async function insertImageFile(editor: TiptapEditor, meetingId: string, file: File, pos?: number): Promise<void> {
   const ext = file.type.split('/')[1] ?? 'png'
   const rel = await window.kasha.saveImage(meetingId, await file.arrayBuffer(), ext)
@@ -46,7 +83,7 @@ export function Editor({ meetingId, markdown, version, editable, onCorrect }: Pr
     extensions: [
       StarterKit.configure({ link: { openOnClick: false, autolink: true } }),
       TaskList,
-      TaskItem.configure({ nested: true }),
+      Task.configure({ nested: true }),
       Image.configure({ allowBase64: false }),
       Placeholder.configure({ placeholder: 'Write notes. The summary is added above them after the call.' }),
       Markdown

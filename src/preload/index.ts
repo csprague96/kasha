@@ -94,10 +94,14 @@ const bar: BarApi = {
   captureStopped: () => ipcRenderer.send('bar:captureStopped'),
   captureLost: (track) => ipcRenderer.send('bar:captureLost', track),
   addNote: (text) => invoke('bar:addNote', text),
+  notes: () => invoke('bar:notes'),
   screenshot: () => invoke('bar:screenshot'),
   stop: () => ipcRenderer.send('bar:stop'),
   openMain: () => ipcRenderer.send('bar:openMain'),
-  onStopRequested: (cb) => on('bar-stop', cb)
+  onStopRequested: (cb) => on('bar-stop', cb),
+  view: () => invoke('bar:view'),
+  setView: (patch) => invoke('bar:setView', patch),
+  onView: (cb) => on('bar-view', cb)
 }
 
 contextBridge.exposeInMainWorld('kasha', kasha)

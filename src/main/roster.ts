@@ -150,11 +150,11 @@ static class KashaTeams {
     return b.Append('"').ToString();
   }
 
-  static string Line(Dictionary<string, Person> people) {
+  static string Line(bool call, Dictionary<string, Person> people) {
     var items = people.Values.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).Select(p =>
       "{\"name\":" + Json(p.Name) + ",\"muted\":" + (p.Muted < 0 ? "null" : p.Muted == 1 ? "true" : "false") +
       ",\"self\":" + (p.Self ? "true" : "false") + ",\"speaking\":" + (p.Speaking < 0 ? "null" : p.Speaking == 1 ? "true" : "false") + "}");
-    return "{\"people\":[" + string.Join(",", items) + "]}";
+    return "{\"call\":" + (call ? "true" : "false") + ",\"people\":[" + string.Join(",", items) + "]}";
   }
 
   static void Main(string[] args) {
@@ -166,6 +166,9 @@ static class KashaTeams {
       return;
     }
     int every = args.Length > 0 ? int.Parse(args[0]) : 2000;
+    // "calls": only whether a call is open, no names (reading names is turned off).
+    bool names = !(args.Length > 1 && args[1] == "calls");
+    var nobody = new Dictionary<string, Person>();
     try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
     // Kasha closes stdin when it's done (or goes away): stop then.
     new Thread(() => { try { while (Console.In.Read() >= 0) { } } catch { } Environment.Exit(0); }) { IsBackground = true }.Start();
@@ -179,8 +182,8 @@ static class KashaTeams {
         if (hwnd == IntPtr.Zero || !IsWindow(hwnd) || (DateTime.UtcNow - found).TotalSeconds > 30) { hwnd = Find(); found = DateTime.UtcNow; }
         bool call = false;
         var people = hwnd == IntPtr.Zero ? null : Read(hwnd, out call);
-        if (!call) { hwnd = IntPtr.Zero; people = null; }
-        line = people == null ? "{\"people\":[]}" : Line(people);
+        if (!call) hwnd = IntPtr.Zero;
+        line = Line(call, call && names ? people : nobody);
       } catch (Exception e) {
         hwnd = IntPtr.Zero;
         line = "{\"error\":" + Json(e.GetType().Name) + "}";
@@ -249,6 +252,8 @@ export async function teamsCallOpen(): Promise<boolean | null> {
  * Watches the Teams window for the length of one recording. Each change is
  * appended to the meeting's roster.jsonl as it's seen, so a crash doesn't lose
  * who was there (Teams only reports changes, so the file stays small).
+ * Whether the call's window is open goes to `onCall`, so the recording can end
+ * as soon as the call does; with `names` off, that's all it reads.
  */
 export class TeamsRoster {
   private child: ChildProcess | null = null
@@ -257,25 +262,31 @@ export class TeamsRoster {
 
   constructor(
     private readonly startedAt: number,
-    private readonly meetingId: string
+    private readonly meetingId: string,
+    private readonly names = true,
+    /** The call's window opened or closed; null once the reader has stopped. */
+    private readonly onCall: (open: boolean | null) => void = () => undefined
   ) {}
 
   async start(): Promise<void> {
     const exe = await helper()
     if (!exe || this.stopped) return
-    const child = spawn(exe, [String(EVERY_MS)], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] })
+    const child = spawn(exe, [String(EVERY_MS), ...(this.names ? [] : ['calls'])], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] })
     this.child = child
     child.on('error', (e) => log('teams-names-failed', { error: e.message.slice(0, 200) }))
+    // The reader stopped by itself: what it last said no longer holds.
+    child.on('exit', () => !this.stopped && this.onCall(null))
     child.stdin?.on('error', () => undefined)
     let errors = 0
     createInterface({ input: child.stdout! }).on('line', (line) => {
       try {
-        const msg = JSON.parse(line) as { people?: RosterPerson[]; error?: string }
+        const msg = JSON.parse(line) as { call?: boolean; people?: RosterPerson[]; error?: string }
         if (msg.error) {
           if (errors++ < 3) log('teams-names-error', { error: msg.error })
           return
         }
-        if (!Array.isArray(msg.people)) return
+        if (typeof msg.call === 'boolean' && !this.stopped) this.onCall(msg.call)
+        if (!this.names || !Array.isArray(msg.people)) return
         const snap = { t: (Date.now() - this.startedAt) / 1000, people: msg.people }
         this.timeline.push(snap)
         try {
@@ -292,6 +303,7 @@ export class TeamsRoster {
   /** Stops reading and returns what was seen. */
   stop(): RosterSnapshot[] {
     this.stopped = true
+    this.onCall(null)
     if (this.child) {
       this.child.stdin?.end()
       this.child.kill()

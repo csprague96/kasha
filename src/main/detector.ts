@@ -16,6 +16,10 @@ const CONSENT_KEY =
 const POLL_MS = 3000
 const START_POLLS = 2 // ~6s of mic use before we prompt, so device tests don't trigger it
 const END_POLLS = 7 // ~20s of mic released before a call counts as over
+// With a reader on the call's window (Teams' Leave button), the window closing ends the call:
+const QUICK_END_POLLS = 2 // ~6s of mic released, once the window has closed
+const WINDOW_SETTLE_MS = 3000 // closed this long, so a redraw in Teams doesn't count
+const WINDOW_GONE_MS = 15_000 // closed this long while the app still holds the mic
 
 const MATCHERS: Array<[DetectableApp, RegExp]> = [
   ['teams', /MSTeams_|[\\#](ms-)?teams\.exe$/i],
@@ -142,26 +146,54 @@ export async function meetingTitle(app: DetectableApp): Promise<string> {
   return cleanTitle(app, out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean))
 }
 
+/** What a reader watching a call's window last said about it. */
+interface CallWindow {
+  open: boolean
+  /** When it opened or closed. */
+  since: number
+  /** It was open at some point in this call. */
+  seen: boolean
+}
+
 /**
  * Emits:
  *  - 'start' (DetectedMeeting) when a meeting app has held the mic for a few seconds
- *  - 'end'   (app) when it has released the mic for ~20s, and `stillInCall`
- *    doesn't say the call is still open. Teams can let go of the mic for a
- *    minute or more mid-call; ending on that alone cut a recording off at 27
- *    minutes and then prompted again every time Teams took the mic back.
+ *  - 'end'   (app, how) when the call is over:
+ *    - 'window': a reader on the call's window (`callWindow`) saw it close and
+ *      the mic went quiet, a few seconds after leaving. If the app keeps the mic
+ *      (straight into the next call, or a mic Windows never marks released),
+ *      15 s after the window closed.
+ *    - 'mic': otherwise, the mic released for ~20s and `stillInCall` doesn't
+ *      say the call is still open. Teams can let go of the mic for a minute or
+ *      more mid-call; ending on that alone cut a recording off at 27 minutes
+ *      and then prompted again every time Teams took the mic back.
  */
 export class MeetingDetector extends EventEmitter {
   private timer: NodeJS.Timeout | null = null
   private seen = new Map<DetectableApp, number>() // consecutive active polls
   private gone = new Map<DetectableApp, number>() // consecutive inactive polls
   private live = new Set<DetectableApp>()
+  private windows = new Map<DetectableApp, CallWindow>()
   private busy = false
 
   constructor(
     private enabled: () => Record<DetectableApp, boolean>,
-    private stillInCall: (app: DetectableApp) => Promise<boolean | null> = async () => null
+    private stillInCall: (app: DetectableApp) => Promise<boolean | null> = async () => null,
+    // Swapped out in tests.
+    private micApps: () => Promise<Set<DetectableApp>> = appsUsingMic,
+    private title: (app: DetectableApp) => Promise<string> = meetingTitle
   ) {
     super()
+  }
+
+  /**
+   * What a reader watching the app's call window sees: open, closed, or null
+   * when it stopped. A window only counts when it closes if it was seen open.
+   */
+  callWindow(app: DetectableApp, open: boolean | null): void {
+    const cur = this.windows.get(app)
+    if (open === null) this.windows.delete(app)
+    else if (cur?.open !== open) this.windows.set(app, { open, since: Date.now(), seen: open || !!cur?.seen })
   }
 
   start(): void {
@@ -182,16 +214,25 @@ export class MeetingDetector extends EventEmitter {
     if (this.busy) return
     this.busy = true
     try {
-      const active = await appsUsingMic()
+      const active = await this.micApps()
       const enabled = this.enabled()
       for (const [app] of MATCHERS) {
+        const w = this.windows.get(app)
+        // How long this call's window has been closed, once it was seen open.
+        const closed = this.live.has(app) && w?.seen && !w.open ? Date.now() - w.since : null
         if (active.has(app) && enabled[app]) {
           this.gone.delete(app)
+          // The app kept the mic after the call's window closed. Counting starts
+          // again, so a call joined straight after is detected as a new one.
+          if (closed !== null && closed >= WINDOW_GONE_MS) {
+            this.end(app, 'window')
+            continue
+          }
           const n = (this.seen.get(app) ?? 0) + 1
           this.seen.set(app, n)
           if (n === START_POLLS && !this.live.has(app)) {
             this.live.add(app)
-            const title = await meetingTitle(app)
+            const title = await this.title(app)
             this.emit('start', { app, title } satisfies DetectedMeeting)
           }
         } else {
@@ -199,20 +240,30 @@ export class MeetingDetector extends EventEmitter {
           if (!this.live.has(app)) continue
           const n = (this.gone.get(app) ?? 0) + 1
           this.gone.set(app, n)
+          if (closed !== null) {
+            if (n >= QUICK_END_POLLS && closed >= WINDOW_SETTLE_MS) this.end(app, 'window')
+            continue
+          }
           if (n >= END_POLLS) {
             // The mic is quiet but the call is still open: look again in ~20 s.
             if ((await this.stillInCall(app)) === true) {
               this.gone.set(app, 0)
               continue
             }
-            this.live.delete(app)
-            this.gone.delete(app)
-            this.emit('end', app)
+            this.end(app, 'mic')
           }
         }
       }
     } finally {
       this.busy = false
     }
+  }
+
+  private end(app: DetectableApp, how: 'mic' | 'window'): void {
+    this.live.delete(app)
+    this.gone.delete(app)
+    this.seen.delete(app)
+    this.windows.delete(app)
+    this.emit('end', app, how)
   }
 }

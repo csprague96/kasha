@@ -3,6 +3,8 @@ import type {
   AppInfo,
   AudioInfo,
   BackgroundState,
+  BarNote,
+  BarView,
   CalendarMatch,
   LiveState,
   Meeting,
@@ -138,11 +140,17 @@ export interface BarApi {
   captureStopped(): void
   /** A track stopped on its own mid-call (device unplugged, audio service restarted). */
   captureLost(track: 'mic' | 'sys'): void
-  addNote(text: string): Promise<void>
+  /** Adds a quick note to the meeting's note; returns the ones typed in the bar so far. */
+  addNote(text: string): Promise<BarNote[]>
+  notes(): Promise<BarNote[]>
   screenshot(): Promise<void>
   stop(): void
   openMain(): void
   onStopRequested(cb: () => void): () => void
+  view(): Promise<BarView>
+  /** Minimize, open the notes drawer, or open up the minimized bar. The window is resized to fit. */
+  setView(patch: Partial<Pick<BarView, 'minimized' | 'notes' | 'expanded'>>): Promise<BarView>
+  onView(cb: (v: BarView) => void): () => void
 }
 
 declare global {

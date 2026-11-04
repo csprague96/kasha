@@ -28,6 +28,7 @@ import {
   isSpeakerId,
   normName,
   normTag,
+  type BarNote,
   type CalendarMatch,
   type DetectedMeeting,
   type LiveState,
@@ -43,6 +44,7 @@ import {
 } from '@shared/types'
 import { listActions, ReminderScheduler, removeAction, setActionDone } from './actions'
 import { audioInfo, deleteAudio, exportAudio, startAudioSweeper } from './audio'
+import { BarLayout, type Anchor } from './bar'
 import { lookupMeeting } from './calendar'
 import { log } from './log'
 import { MeetingDetector } from './detector'
@@ -96,6 +98,9 @@ protocol.registerSchemesAsPrivileged([
 let mainWin: BrowserWindow | null = null
 let toastWin: BrowserWindow | null = null
 let barWin: BrowserWindow | null = null
+let barLayout: BarLayout | null = null
+/** Where the user last put the bar, so a new bar (next call, or capture restarted) opens there. */
+let barAnchor: Anchor | null = null
 let tray: Tray | null = null
 
 let toast: ToastState | null = null
@@ -112,10 +117,12 @@ interface ActiveRecording extends RecordingInfo {
   accepted: boolean
   /** When capture was restarted, to give up if it keeps happening. */
   restarts: number[]
-  /** Reads who's in the Teams call, for naming speakers. */
+  /** Watches the Teams call's window, and reads who's in it for naming speakers. */
   roster: TeamsRoster | null
   /** When audio last arrived from the bar, to notice capture that stopped silently. */
   lastAudio: number
+  /** Quick notes typed in the bar, shown in its drawer. */
+  notes: BarNote[]
   /** The bar couldn't open the mic or the computer's audio: nothing to watch for. */
   noCapture?: boolean
 }
@@ -191,7 +198,13 @@ function showMain(view?: NavView): void {
   if (!mainWin || mainWin.isDestroyed()) {
     const hash = view?.settings ? '#settings' : view?.actions ? '#actions' : view?.meetingId ? `#meeting=${view.meetingId}` : ''
     mainWin = createMainWindow(hash)
-    mainWin.on('closed', () => (mainWin = null))
+    mainWin.on('closed', () => {
+      mainWin = null
+      raiseBar()
+    })
+    mainWin.on('blur', raiseBar)
+    mainWin.on('minimize', raiseBar)
+    mainWin.on('hide', raiseBar)
     return
   }
   if (mainWin.isMinimized()) mainWin.restore()
@@ -414,10 +427,11 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
       : null
   // Live transcription starts again from the top of what's already recorded.
   for (const [track, bytes] of Object.entries(rec.lengths())) live?.wrote(track as Track, bytes)
-  // A Teams call (detected, or recorded by hand while one is on): read who's in it.
-  const roster = settings.speakers.fromTeams && (meeting.app === 'teams' || detector.isLive('teams')) ? new TeamsRoster(startedAt, id) : null
+  // A Teams call (detected, or recorded by hand while one is on): watch its
+  // window, so recording ends when the call does, and read who's in it.
+  const roster = meeting.app === 'teams' || detector.isLive('teams') ? new TeamsRoster(startedAt, id, settings.speakers.fromTeams, onTeamsWindow) : null
   void roster?.start()
-  recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted, restarts: [], roster, lastAudio: Date.now() }
+  recording = { meetingId: id, title: meeting.title, startedAt, app: meeting.app, rec, live, stopping: false, accepted: !!opts.accepted, restarts: [], roster, lastAudio: Date.now(), notes: [] }
   // An earlier note still being finished makes room for this call.
   background.setInCall(true)
   log('recording-started', { app: meeting.app, how: resume ? 'resume' : opts.auto ? 'auto' : opts.accepted ? 'prompt' : 'manual', live: !!live, model: settings.speechModel, carriedOnMin: had ? Math.round(had / 60) : undefined })
@@ -446,8 +460,21 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
 /** The bar hosts audio capture, so opening it starts capturing. */
 function openBar(): void {
   const win = createBarWindow()
+  const layout = new BarLayout(win, store.getSettings().barMinimized, barAnchor, (view) => {
+    if (!win.isDestroyed()) win.webContents.send('bar-view', view)
+  })
   barWin = win
-  win.on('closed', () => barWin === win && (barWin = null))
+  barLayout = layout
+  win.on('closed', () => {
+    barAnchor = layout.anchor()
+    if (barWin === win) barWin = null
+    if (barLayout === layout) barLayout = null
+  })
+}
+
+/** Back on top of other windows: Windows can leave the bar behind them while the note window is in use. */
+function raiseBar(): void {
+  if (barWin && !barWin.isDestroyed() && barWin.isVisible()) barWin.setAlwaysOnTop(true, 'screen-saver')
 }
 
 /**
@@ -671,8 +698,14 @@ async function onDetected(m: DetectedMeeting): Promise<void> {
   if (alwaysRecords(m.title, match)) await startRecording(undefined, m, { auto: true })
 }
 
-detector.on('end', (appName: string) => {
-  log('call-ended', { app: appName, prompt: toast?.kind === 'detected' && toast.meeting.app === appName, recording: recording?.app === appName })
+/** The Teams call's window opened or closed, or its reader stopped (null). */
+function onTeamsWindow(open: boolean | null): void {
+  if (open !== null) log('call-window', { app: 'teams', open })
+  detector.callWindow('teams', open)
+}
+
+detector.on('end', (appName: string, how: string) => {
+  log('call-ended', { app: appName, how, prompt: toast?.kind === 'detected' && toast.meeting.app === appName, recording: recording?.app === appName })
   dismissed.delete(appName)
   lookups.delete(appName)
   if (toast?.kind === 'detected' && toast.meeting.app === appName) closeToast()
@@ -1038,9 +1071,27 @@ function registerIpc(): void {
   ipcMain.on('bar:captureLost', (e, track: string) => {
     if (e.sender.id === barWin?.webContents.id) restartCapture(`${track === 'mic' ? 'mic' : 'sys'}-ended`)
   })
-  handle('bar:addNote', (text: string) => {
-    if (!recording || !text.trim()) return
-    appendToNote(recording.meetingId, `\`${elapsedLabel()}\` ${text.trim()}`)
+  handle('bar:addNote', (text: string): BarNote[] => {
+    if (!recording) return []
+    const t = String(text).trim()
+    if (t) {
+      const at = elapsedLabel()
+      appendToNote(recording.meetingId, `\`${at}\` ${t}`)
+      recording.notes.push({ at, text: t })
+    }
+    return recording.notes
+  })
+  handle('bar:notes', () => recording?.notes ?? [])
+  handle('bar:view', () => barLayout?.get() ?? null)
+  handle('bar:setView', (patch: Partial<Record<'minimized' | 'notes' | 'expanded', unknown>>) => {
+    if (!barLayout) return null
+    const next: Partial<Record<'minimized' | 'notes' | 'expanded', boolean>> = {}
+    for (const k of ['minimized', 'notes', 'expanded'] as const) if (typeof patch?.[k] === 'boolean') next[k] = patch[k] as boolean
+    // Minimizing is remembered: the next recording's bar starts the same way.
+    if (next.minimized !== undefined && next.minimized !== store.getSettings().barMinimized) {
+      broadcast('settings-changed', store.setSettings({ barMinimized: next.minimized }))
+    }
+    return barLayout.set(next)
   })
   handle('bar:screenshot', async () => {
     if (!recording) return

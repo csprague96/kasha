@@ -155,6 +155,28 @@
   color: var(--muted);
   text-decoration: line-through;
 }
+/* Delete, after an action's text: shown on the line under the pointer, or when tabbed to. */
+.note-editor .ProseMirror .task-delete {
+  flex: none;
+  margin-top: 0.35em;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  opacity: 0;
+  cursor: pointer;
+}
+.note-editor .ProseMirror li:hover:not(:has(li:hover)) > .task-delete,
+.note-editor .ProseMirror .task-delete:focus-visible {
+  opacity: 1;
+}
+.note-editor .ProseMirror .task-delete:hover {
+  color: var(--destructive);
+  text-decoration: underline;
+}
+.note-editor .ProseMirror[contenteditable='false'] .task-delete {
+  display: none;
+}
 /* Inline code is how timestamps are stored: `12:40` */
 .note-editor .ProseMirror code {
   font-family: var(--font-mono);
@@ -226,3 +248,20 @@
   background-clip: text;
   color: transparent;
 }
+
+/* Recording bar: the notes drawer slides out from under the bar (from above it, near the
+   bottom of the screen) and back, and the bar pops open from its logo. */
+@keyframes bar-drawer {
+  from { opacity: 0; transform: translateY(-10px); }
+}
+@keyframes bar-drawer-up {
+  from { opacity: 0; transform: translateY(10px); }
+}
+@keyframes bar-pop {
+  from { opacity: 0; transform: scale(0.94); }
+}
+.bar-drawer-in { animation: bar-drawer 160ms ease-out; }
+.bar-drawer-in-up { animation: bar-drawer-up 160ms ease-out; }
+.bar-drawer-out { animation: bar-drawer 130ms ease-in reverse forwards; }
+.bar-drawer-out-up { animation: bar-drawer-up 130ms ease-in reverse forwards; }
+.bar-pop { animation: bar-pop 140ms ease-out; }
