@@ -9,7 +9,8 @@
  * Palette: warm paper neutrals so long notes read like a document, one deep
  * blue for actions, orange reserved for "recording", oxblood for tags.
  */
-:root {
+:root,
+[data-theme='kasha'] {
   --bg: #f6f5f2;
   --surface: #ffffff;
   --sidebar: #efede8;
@@ -27,7 +28,8 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root,
+  [data-theme='kasha'] {
     --bg: #14171b;
     --surface: #1b1f24;
     --sidebar: #101316;
@@ -42,6 +44,43 @@
     --tag-fg: #e59bc8;
     --destructive: #f07167;
     color-scheme: dark;
+  }
+}
+
+/*
+ * Pink (Settings > General): blush paper, rose for actions. Selected by
+ * data-theme on <html>, or on any element (the previews in Settings). The
+ * palette's brightest pink reads at under 3:1 as text on this paper, so
+ * actions use its deeper rose. Recording orange, the
+ * green and the reds keep their meaning in every theme.
+ */
+[data-theme='pink'] {
+  --bg: oklch(0.9789 0.0128 345.48);
+  --surface: oklch(1 0 0);
+  --sidebar: oklch(0.9471 0.0155 345.57);
+  --fg: oklch(0.2562 0.0768 352.98);
+  --muted: oklch(0.5353 0.0508 347.48);
+  --border: oklch(0.8973 0.0236 345.82);
+  --primary: oklch(0.5606 0.2179 358.57);
+  --primary-fg: oklch(1 0 0);
+  --tag: oklch(0.923 0.0365 346.15);
+  --tag-fg: oklch(0.4014 0.1331 354.3);
+  --radius-md: 10px;
+  --radius-lg: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme='pink'] {
+    --bg: oklch(0.1617 0.0244 348.75);
+    --surface: oklch(0.205 0.0334 349.09);
+    --sidebar: oklch(0.1828 0.0351 349.82);
+    --fg: oklch(0.9589 0.0064 345.32);
+    --muted: oklch(0.7089 0.0366 346.44);
+    --border: oklch(0.2858 0.0474 349.16);
+    --primary: oklch(0.7628 0.1452 349.77);
+    --primary-fg: oklch(0.2043 0.038 349.66);
+    --tag: oklch(0.3038 0.0832 352.1);
+    --tag-fg: oklch(0.8538 0.0803 347.46);
   }
 }
 

@@ -28,6 +28,7 @@ import {
   isSpeakerId,
   normName,
   normTag,
+  type AskTurn,
   type BarNote,
   type CalendarMatch,
   type DetectedMeeting,
@@ -43,7 +44,8 @@ import {
   type TranscriptSegment
 } from '@shared/types'
 import { listActions, ReminderScheduler, removeAction, setActionDone } from './actions'
-import { audioInfo, deleteAudio, exportAudio, startAudioSweeper } from './audio'
+import { askAbout, findNotes, noteTarget, relatedNotes } from './ask'
+import { audioClip, audioInfo, deleteAudio, exportAudio, startAudioSweeper } from './audio'
 import { BarLayout, type Anchor } from './bar'
 import { lookupMeeting } from './calendar'
 import { log } from './log'
@@ -724,12 +726,15 @@ function handle(channel: string, fn: (...args: any[]) => unknown): void {
 
 function registerIpc(): void {
   handle('meetings:list', () => store.listMeetings())
+  // During a call, the lines transcribed so far.
+  const transcriptOf = (id: string): TranscriptSegment[] => {
+    const live = getLive(id)
+    return live ? live.current().map((s) => ({ ...s, text: cleanText(s.text) })) : store.readTranscript(id)
+  }
   handle('meetings:get', (id: string) => {
     const meeting = store.getMeeting(id)
     if (!meeting) return null
-    const live = getLive(id)
-    const transcript = live ? live.current().map((s) => ({ ...s, text: cleanText(s.text) })) : store.readTranscript(id)
-    return { meeting, note: store.readNote(id), transcript, audio: meeting.status === 'recording' ? null : audioInfo(id) }
+    return { meeting, note: store.readNote(id), transcript: transcriptOf(id), audio: meeting.status === 'recording' ? null : audioInfo(id) }
   })
   handle('meetings:saveAudio', async (id: string) => {
     const m = store.getMeeting(id)
@@ -747,6 +752,11 @@ function registerIpc(): void {
     if (!m || m.status === 'recording' || m.status === 'transcribing' || m.status === 'separating') return
     deleteAudio(id)
     broadcast('meetings-changed')
+  })
+  handle('meetings:audioClip', (id: string, speaker: SpeakerId, start: number, end: number) => {
+    const m = store.getMeeting(id)
+    if (!m || m.status === 'recording' || !isSpeakerId(speaker) || !Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
+    return audioClip(id, speaker === 'you' ? 'mic' : 'sys', Math.max(0, start), end)
   })
   handle('meetings:create', () => {
     const m = store.createMeeting({ title: 'New note', app: 'manual' })
@@ -918,6 +928,34 @@ function registerIpc(): void {
     void shell.openExternal(`obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(rel)}`)
   })
 
+  handle('ask:related', (id: string) => {
+    const m = store.getMeeting(id)
+    return m ? relatedNotes(m, transcriptOf(id)) : []
+  })
+  handle('ask:find', (id: string, query: string) => {
+    const m = store.getMeeting(id)
+    return m ? findNotes(m, String(query ?? '')) : []
+  })
+  handle('ask:ask', (id: string, question: string, notes: unknown, history: unknown) => {
+    const m = store.getMeeting(id)
+    if (!m) throw new Error('Note not found')
+    const keys = Array.isArray(notes) ? notes.filter((k): k is string => typeof k === 'string') : []
+    const turns = Array.isArray(history)
+      ? history.filter((h): h is AskTurn => typeof h?.question === 'string' && typeof h?.answer === 'string')
+      : []
+    return askAbout(m, transcriptOf(id), String(question ?? ''), keys, turns)
+  })
+  handle('ask:open', (key: string) => {
+    const t = noteTarget(String(key))
+    if (t && 'meetingId' in t) showMain({ meetingId: t.meetingId })
+    else if (t) void shell.openExternal(t.url)
+  })
+  handle('meetings:append', (id: string, md: string) => {
+    if (!store.getMeeting(id) || !String(md ?? '').trim()) return
+    appendToNote(id, String(md).trim().slice(0, 20_000))
+    broadcast('actions-changed')
+  })
+
   handle('actions:list', () => listActions())
   handle('actions:setDone', (id: string, index: number, raw: string, done: boolean) => {
     setActionDone(id, Number(index), String(raw), !!done)
@@ -951,6 +989,8 @@ function registerIpc(): void {
     const s = store.setSettings(patch)
     if (was && !s.speakers.recognize) forgetMeetingPrints()
     applyLoginItem()
+    // The bar and the call prompt follow a change of theme while they're open.
+    broadcast('settings-changed', s)
     return s
   })
   handle('setup:status', () => setupStatus())

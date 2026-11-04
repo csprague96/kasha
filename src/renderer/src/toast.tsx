@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { APP_LABELS, GENERIC_TITLE, type ToastState } from '@shared/types'
 import { Button } from './components/ui/button'
+import { followTheme } from './lib/theme'
 import './styles.css'
 
 function Toast() {
@@ -65,6 +66,7 @@ function Toast() {
 }
 
 document.body.style.background = 'transparent'
+followTheme()
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <Toast />

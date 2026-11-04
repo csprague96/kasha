@@ -5,6 +5,7 @@ import {
   normName,
   normTag,
   SPEECH_MODELS,
+  THEMES,
   type CalendarMatch,
   type TagCount,
   type SetupStatus,
@@ -478,6 +479,42 @@ function ModelPicker({
   )
 }
 
+/** Kasha's own colours or Pink, each previewed in its own palette. Light or dark follows Windows. */
+function ThemePicker({ settings, onChange }: Props) {
+  return (
+    <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Theme">
+      {THEMES.map((t) => {
+        const selected = settings.theme === t.id
+        return (
+          <label
+            key={t.id}
+            className={cn(
+              'flex w-56 cursor-pointer items-center gap-3 rounded-md border px-3 py-2.5',
+              selected ? 'border-primary bg-surface' : 'border-border bg-surface hover:bg-sidebar'
+            )}
+          >
+            <input
+              type="radio"
+              name="theme"
+              className="accent-[var(--color-primary)]"
+              checked={selected}
+              onChange={() => void onChange({ theme: t.id })}
+            />
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="font-medium">{t.name}</span>
+              <span className="text-xs text-muted">{t.detail}</span>
+            </span>
+            <span data-theme={t.id} className="flex h-9 w-12 shrink-0 items-end gap-1 rounded-md border border-border bg-background p-1.5" aria-hidden="true">
+              <span className="h-3 flex-1 rounded-sm bg-primary" />
+              <span className="h-3 flex-1 rounded-sm bg-tag" />
+            </span>
+          </label>
+        )
+      })}
+    </div>
+  )
+}
+
 export type SettingsPage = 'recording' | 'detection' | 'transcription' | 'speakers' | 'vocabulary' | 'obsidian' | 'tags' | 'actions' | 'general'
 
 const PAGES: Array<{ id: SettingsPage; label: string; icon: LucideIcon }> = [
@@ -752,6 +789,9 @@ export function Settings({ settings, onChange, page, onPage }: Props & { page: S
     ),
     general: (
       <Section title="General">
+        <Field group label="Theme" hint="For every Kasha window, the recording bar included. Light or dark follows Windows.">
+          <ThemePicker settings={settings} onChange={onChange} />
+        </Field>
         <Toggle
           label="Start Kasha when you sign in"
           checked={settings.launchAtLogin}

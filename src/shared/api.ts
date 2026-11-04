@@ -1,6 +1,8 @@
 import type {
   ActionGroup,
   AppInfo,
+  AskAnswer,
+  AskTurn,
   AudioInfo,
   BackgroundState,
   BarNote,
@@ -10,10 +12,12 @@ import type {
   Meeting,
   MeetingPatch,
   RecordingInfo,
+  RelatedNote,
   ReplaceOptions,
   SetupStatus,
   Settings,
   ShareOptions,
+  SpeakerId,
   TagCount,
   ToastState,
   TranscriptSegment,
@@ -29,6 +33,8 @@ export interface KashaApi {
   /** Copies the recording to a folder the user picks. False if they cancelled. */
   saveAudio(id: string): Promise<boolean>
   deleteAudio(id: string): Promise<void>
+  /** The recording of one line, as a short WAV: the mic for You, the computer's audio for anyone else. Null once the recording is gone. */
+  audioClip(id: string, speaker: SpeakerId, start: number, end: number): Promise<Uint8Array<ArrayBuffer> | null>
   createNote(): Promise<Meeting>
   updateMeeting(id: string, patch: MeetingPatch): Promise<Meeting>
   saveNote(id: string, markdown: string): Promise<void>
@@ -48,6 +54,18 @@ export interface KashaApi {
   retry(id: string): Promise<void>
   syncNow(id: string): Promise<void>
   revealInObsidian(id: string): Promise<void>
+
+  // Ask about a call, with related notes from Obsidian
+  /** Notes in the vault (or in Kasha) on the same topic as this call, best first. */
+  relatedNotes(id: string): Promise<RelatedNote[]>
+  /** Notes whose title or tags match what was typed, to add one by hand. */
+  findNotes(id: string, query: string): Promise<RelatedNote[]>
+  /** Answers a question from this call and the chosen notes (by key), carrying on from `history`. */
+  ask(id: string, question: string, notes: string[], history: AskTurn[]): Promise<AskAnswer>
+  /** Opens a related note: in Kasha if it came from Kasha, otherwise in Obsidian. */
+  openNote(key: string): Promise<void>
+  /** Adds markdown to the end of the note (an answer worth keeping). */
+  appendToNote(id: string, markdown: string): Promise<void>
 
   // Actions
   listActions(): Promise<ActionGroup[]>
