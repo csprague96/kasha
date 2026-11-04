@@ -160,8 +160,11 @@ export interface BarApi {
   captureLost(track: 'mic' | 'sys'): void
   /** Adds a quick note to the meeting's note; returns the ones typed in the bar so far. */
   addNote(text: string): Promise<BarNote[]>
+  /** Adds a pasted picture (PNG, JPEG, GIF or WebP) to the meeting's note; returns the bar's notes so far. */
+  addImage(data: ArrayBuffer, type: string): Promise<BarNote[]>
   notes(): Promise<BarNote[]>
-  screenshot(): Promise<void>
+  /** Resolves once the snip is added (or cancelled), with the bar's notes so far. */
+  screenshot(): Promise<BarNote[]>
   stop(): void
   openMain(): void
   onStopRequested(cb: () => void): () => void

@@ -101,6 +101,7 @@ const bar: BarApi = {
   captureStopped: () => ipcRenderer.send('bar:captureStopped'),
   captureLost: (track) => ipcRenderer.send('bar:captureLost', track),
   addNote: (text) => invoke('bar:addNote', text),
+  addImage: (data, type) => invoke('bar:addImage', data, type),
   notes: () => invoke('bar:notes'),
   screenshot: () => invoke('bar:screenshot'),
   stop: () => ipcRenderer.send('bar:stop'),

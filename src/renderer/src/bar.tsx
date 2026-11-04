@@ -1,4 +1,4 @@
-import { Camera, ChevronDown, ChevronUp, Minimize2, Pause, PenLine, Pin, Play } from 'lucide-react'
+import { Camera, ChevronDown, ChevronUp, Image as ImageIcon, Minimize2, Pause, PenLine, Pin, Play } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { BarNote, BarView, LiveState, RecordingInfo } from '@shared/types'
@@ -107,15 +107,25 @@ async function startCapture(): Promise<Capture> {
 // ---------- UI ----------
 
 /**
+ * A picture pasted on its own: a snip, a copied image. Not one that comes with
+ * text, as cells copied from Excel do; that pastes as text.
+ */
+function pastedPicture(data: DataTransfer): File | null {
+  if (data.getData('text/plain').trim()) return null
+  return Array.from(data.files).find((f) => /^image\/(png|jpeg|gif|webp)$/.test(f.type)) ?? null
+}
+
+/**
  * Quick notes, in a drawer that slides out of the bar. Each one goes into the
- * meeting's note with the time into the call; the ones typed here so far are
- * listed above the box.
+ * meeting's note with the time into the call; the ones added here so far
+ * (screenshots and pasted pictures too) are listed above the box.
  */
 function NotesDrawer(props: {
   notes: BarNote[]
   draft: string
   onDraft: (v: string) => void
   onAdd: () => void
+  onPicture: (file: File) => void
   onHide: () => void
   up: boolean
   closing: boolean
@@ -151,12 +161,19 @@ function NotesDrawer(props: {
       </div>
       <ol ref={list} className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
         {notes.length === 0 ? (
-          <li className="text-muted">Nothing yet. Type below and press Enter.</li>
+          <li className="text-muted">Nothing yet. Type below and press Enter, or paste a picture.</li>
         ) : (
           notes.map((n, i) => (
             <li key={i} className="flex gap-2 leading-5">
               <span className="tabular shrink-0 font-mono text-xs leading-5 text-muted">{n.at}</span>
-              <span className="min-w-0 break-words whitespace-pre-wrap">{n.text}</span>
+              {n.image ? (
+                <span className="inline-flex min-w-0 items-center gap-1.5 text-muted">
+                  <ImageIcon className="size-3.5 shrink-0" aria-hidden="true" />
+                  {n.text} added
+                </span>
+              ) : (
+                <span className="min-w-0 break-words whitespace-pre-wrap">{n.text}</span>
+              )}
             </li>
           ))
         )}
@@ -166,6 +183,12 @@ function NotesDrawer(props: {
         value={draft}
         rows={2}
         onChange={(e) => props.onDraft(e.target.value)}
+        onPaste={(e) => {
+          const file = pastedPicture(e.clipboardData)
+          if (!file) return
+          e.preventDefault()
+          props.onPicture(file)
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault()
@@ -224,6 +247,10 @@ function Bar() {
     setNotes(await window.bar.addNote(v))
   }
 
+  const addPicture = async (file: File) => {
+    setNotes(await window.bar.addImage(await file.arrayBuffer(), file.type))
+  }
+
   // The drawer slides away first; the window shrinks once it's gone.
   const closed = useRef<number | undefined>(undefined)
   const hideNotes = () => {
@@ -240,7 +267,7 @@ function Bar() {
   const screenshot = async () => {
     setSnipping(true)
     try {
-      await window.bar.screenshot()
+      setNotes(await window.bar.screenshot())
     } finally {
       setSnipping(false)
     }
@@ -351,6 +378,7 @@ function Bar() {
           draft={draft}
           onDraft={setDraft}
           onAdd={() => void addNote()}
+          onPicture={(f) => void addPicture(f)}
           onHide={hideNotes}
           up={view.up}
           closing={closing}

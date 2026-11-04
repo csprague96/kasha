@@ -194,6 +194,23 @@ function elapsedLabel(): string {
   return h ? `${h}:${p(m)}:${p(s % 60)}` : `${p(m)}:${p(s % 60)}`
 }
 
+const PICTURE_TYPES: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }
+const PICTURE_MAX = 25 * 1024 * 1024
+
+/**
+ * A screenshot or pasted picture from the bar: saved beside the note as
+ * `12-40.png` (the time into the call) and added to the note under that time.
+ * It's listed in the bar too, while that recording is still going.
+ */
+function addPicture(id: string, at: string, data: Buffer, ext: string, label: string): void {
+  const base = at.replace(/:/g, '-')
+  let name = `${base}.${ext}`
+  for (let i = 2; existsSync(join(store.paths.meeting(id), 'attachments', name)); i++) name = `${base}-${i}.${ext}`
+  writeFileSync(join(store.paths.meeting(id), 'attachments', name), data)
+  appendToNote(id, `\`${at}\`\n\n![${label} ${at}](attachments/${name})`)
+  if (recording?.meetingId === id) recording.notes.push({ at, text: label, image: true })
+}
+
 type NavView = { meetingId?: string; settings?: boolean; actions?: boolean }
 
 function showMain(view?: NavView): void {
@@ -700,9 +717,17 @@ async function onDetected(m: DetectedMeeting): Promise<void> {
   if (alwaysRecords(m.title, match)) await startRecording(undefined, m, { auto: true })
 }
 
-/** The Teams call's window opened or closed, or its reader stopped (null). */
-function onTeamsWindow(open: boolean | null): void {
-  if (open !== null) log('call-window', { app: 'teams', open })
+let teamsWindow = ''
+
+/**
+ * The Teams call's window opened, closed or went out of sight ('away'), or its
+ * reader stopped (null). Logged when that changes: the reader says it again
+ * whenever the people on screen change.
+ */
+function onTeamsWindow(open: boolean | 'away' | null, where?: string): void {
+  const said = open === 'away' ? `away ${where}` : open === null ? '' : String(open)
+  if (said && said !== teamsWindow) log('call-window', open === 'away' ? { app: 'teams', away: where ?? 'yes' } : { app: 'teams', open })
+  teamsWindow = said
   detector.callWindow('teams', open)
 }
 
@@ -1133,8 +1158,8 @@ function registerIpc(): void {
     }
     return barLayout.set(next)
   })
-  handle('bar:screenshot', async () => {
-    if (!recording) return
+  handle('bar:screenshot', async (): Promise<BarNote[]> => {
+    if (!recording) return []
     const id = recording.meetingId
     const stamp = elapsedLabel()
     barWin?.hide()
@@ -1145,13 +1170,16 @@ function registerIpc(): void {
     } finally {
       barWin?.showInactive()
     }
-    if (!png) return
-    let name = `${stamp.replace(/:/g, '-')}.png`
-    for (let i = 2; existsSync(join(store.paths.meeting(id), 'attachments', name)); i++) {
-      name = `${stamp.replace(/:/g, '-')}-${i}.png`
-    }
-    writeFileSync(join(store.paths.meeting(id), 'attachments', name), png)
-    appendToNote(id, `\`${stamp}\`\n\n![Screenshot ${stamp}](attachments/${name})`)
+    if (png) addPicture(id, stamp, png, 'png', 'Screenshot')
+    return recording?.notes ?? []
+  })
+  // A picture pasted into the notes drawer (a snip from Win+Shift+S, a copied image).
+  handle('bar:addImage', (data: ArrayBuffer, type: string): BarNote[] => {
+    if (!recording) return []
+    const ext = PICTURE_TYPES[String(type)]
+    const bytes = data instanceof ArrayBuffer ? Buffer.from(data) : null
+    if (ext && bytes?.length && bytes.length <= PICTURE_MAX) addPicture(recording.meetingId, elapsedLabel(), bytes, ext, 'Image')
+    return recording.notes
   })
   ipcMain.on('bar:stop', () => stopRecording())
   ipcMain.on('bar:openMain', () => recording && showMain({ meetingId: recording.meetingId }))
