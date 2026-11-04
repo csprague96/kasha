@@ -48,6 +48,10 @@ using System.Threading; using System.Windows.Automation;
 
 static class KashaTeams {
   [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int value, int size);
+  const int DWMWA_CLOAKED = 14;
 
   class Person { public string Name; public int Muted = -1; public bool Self; public int Speaking = -1; }
 
@@ -100,9 +104,10 @@ static class KashaTeams {
     var live = AutomationElement.FromHandle(hwnd);
     AutomationElement root;
     using (Cache().Activate()) root = live.FindFirst(TreeScope.Element, Condition.TrueCondition);
+    call = false;
+    if (root == null) return people;
     var stack = new Stack<AutomationElement>();
     stack.Push(root);
-    call = false;
     int seen = 0;
     while (stack.Count > 0 && seen++ < 20000) {
       var e = stack.Pop();
@@ -140,6 +145,16 @@ static class KashaTeams {
     return best;
   }
 
+  // Out of sight, where Teams can't be read: on another desktop (Windows cloaks
+  // the window, and UI Automation then neither lists nor reads it), or minimized.
+  // A window Teams hid is put away, not out of sight.
+  static string Away(IntPtr h) {
+    if (!IsWindowVisible(h)) return null;
+    int cloaked;
+    if (DwmGetWindowAttribute(h, DWMWA_CLOAKED, out cloaked, 4) == 0 && cloaked != 0) return "desktop";
+    return IsIconic(h) ? "minimized" : null;
+  }
+
   static string Json(string s) {
     var b = new StringBuilder("\"");
     foreach (var ch in s) {
@@ -150,11 +165,12 @@ static class KashaTeams {
     return b.Append('"').ToString();
   }
 
-  static string Line(bool call, Dictionary<string, Person> people) {
+  static string Line(bool call, string away, Dictionary<string, Person> people) {
     var items = people.Values.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).Select(p =>
       "{\"name\":" + Json(p.Name) + ",\"muted\":" + (p.Muted < 0 ? "null" : p.Muted == 1 ? "true" : "false") +
       ",\"self\":" + (p.Self ? "true" : "false") + ",\"speaking\":" + (p.Speaking < 0 ? "null" : p.Speaking == 1 ? "true" : "false") + "}");
-    return "{\"call\":" + (call ? "true" : "false") + ",\"people\":[" + string.Join(",", items) + "]}";
+    var said = call ? "true" : away != null ? "null,\"away\":" + Json(away) : "false";
+    return "{\"call\":" + said + ",\"people\":[" + string.Join(",", items) + "]}";
   }
 
   static void Main(string[] args) {
@@ -179,13 +195,26 @@ static class KashaTeams {
     while (true) {
       string line;
       try {
-        if (hwnd == IntPtr.Zero || !IsWindow(hwnd) || (DateTime.UtcNow - found).TotalSeconds > 30) { hwnd = Find(); found = DateTime.UtcNow; }
+        if (hwnd != IntPtr.Zero && !IsWindow(hwnd)) hwnd = IntPtr.Zero;
+        // The call's window is kept while it's out of sight: that isn't the call ending.
+        var away = hwnd == IntPtr.Zero ? null : Away(hwnd);
         bool call = false;
-        var people = hwnd == IntPtr.Zero ? null : Read(hwnd, out call);
-        if (!call) hwnd = IntPtr.Zero;
-        line = Line(call, call && names ? people : nobody);
+        Dictionary<string, Person> people = null;
+        if (away != "desktop") {
+          if (hwnd == IntPtr.Zero || (DateTime.UtcNow - found).TotalSeconds > 30) {
+            var h = Find();
+            found = DateTime.UtcNow;
+            if (h != IntPtr.Zero) hwnd = h;
+          }
+          if (hwnd != IntPtr.Zero) people = Read(hwnd, out call);
+          // Asked again: it can go out of sight while it's being read.
+          away = call || hwnd == IntPtr.Zero ? null : Away(hwnd);
+        }
+        if (!call && away == null) hwnd = IntPtr.Zero;
+        line = Line(call, away, call && names ? people : nobody);
       } catch (Exception e) {
-        hwnd = IntPtr.Zero;
+        // Looked for again next time, unless it's out of sight, where it can't be found.
+        if (!IsWindow(hwnd) || Away(hwnd) == null) hwnd = IntPtr.Zero;
         line = "{\"error\":" + Json(e.GetType().Name) + "}";
       }
       if (line != last) { Console.Out.WriteLine(line); Console.Out.Flush(); last = line; }
@@ -264,8 +293,11 @@ export class TeamsRoster {
     private readonly startedAt: number,
     private readonly meetingId: string,
     private readonly names = true,
-    /** The call's window opened or closed; null once the reader has stopped. */
-    private readonly onCall: (open: boolean | null) => void = () => undefined
+    /**
+     * The call's window opened or closed; 'away' while it's out of sight (on
+     * another desktop, or minimized), with where; null once the reader has stopped.
+     */
+    private readonly onCall: (open: boolean | 'away' | null, where?: string) => void = () => undefined
   ) {}
 
   async start(): Promise<void> {
@@ -280,12 +312,15 @@ export class TeamsRoster {
     let errors = 0
     createInterface({ input: child.stdout! }).on('line', (line) => {
       try {
-        const msg = JSON.parse(line) as { call?: boolean; people?: RosterPerson[]; error?: string }
+        const msg = JSON.parse(line) as { call?: boolean | null; away?: string; people?: RosterPerson[]; error?: string }
         if (msg.error) {
           if (errors++ < 3) log('teams-names-error', { error: msg.error })
           return
         }
-        if (typeof msg.call === 'boolean' && !this.stopped) this.onCall(msg.call)
+        if (!this.stopped) {
+          if (typeof msg.away === 'string') this.onCall('away', msg.away)
+          else if (typeof msg.call === 'boolean') this.onCall(msg.call)
+        }
         if (!this.names || !Array.isArray(msg.people)) return
         const snap = { t: (Date.now() - this.startedAt) / 1000, people: msg.people }
         this.timeline.push(snap)

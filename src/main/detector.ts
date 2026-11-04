@@ -162,7 +162,9 @@ interface CallWindow {
  *    - 'window': a reader on the call's window (`callWindow`) saw it close and
  *      the mic went quiet, a few seconds after leaving. If the app keeps the mic
  *      (straight into the next call, or a mic Windows never marks released),
- *      15 s after the window closed.
+ *      15 s after the window closed. A window out of sight isn't closed:
+ *      counting one on another desktop as closed ended calls 15 s after the
+ *      user switched desktops, and then prompted again.
  *    - 'mic': otherwise, the mic released for ~20s and `stillInCall` doesn't
  *      say the call is still open. Teams can let go of the mic for a minute or
  *      more mid-call; ending on that alone cut a recording off at 27 minutes
@@ -187,13 +189,18 @@ export class MeetingDetector extends EventEmitter {
   }
 
   /**
-   * What a reader watching the app's call window sees: open, closed, or null
-   * when it stopped. A window only counts when it closes if it was seen open.
+   * What a reader watching the app's call window sees: open, closed, 'away'
+   * when it's out of sight (on another desktop, or minimized), or null when it
+   * stopped. A window only counts when it closes if it was seen open. Out of
+   * sight, the window can't be read, so that isn't it closing: the mic decides.
    */
-  callWindow(app: DetectableApp, open: boolean | null): void {
+  callWindow(app: DetectableApp, open: boolean | 'away' | null): void {
     const cur = this.windows.get(app)
-    if (open === null) this.windows.delete(app)
-    else if (cur?.open !== open) this.windows.set(app, { open, since: Date.now(), seen: open || !!cur?.seen })
+    if (open === null) return void this.windows.delete(app)
+    const isOpen = open !== false
+    const seen = open === true || !!cur?.seen
+    if (cur?.open !== isOpen) this.windows.set(app, { open: isOpen, since: Date.now(), seen })
+    else cur.seen = seen
   }
 
   start(): void {

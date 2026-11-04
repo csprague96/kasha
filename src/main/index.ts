@@ -700,9 +700,17 @@ async function onDetected(m: DetectedMeeting): Promise<void> {
   if (alwaysRecords(m.title, match)) await startRecording(undefined, m, { auto: true })
 }
 
-/** The Teams call's window opened or closed, or its reader stopped (null). */
-function onTeamsWindow(open: boolean | null): void {
-  if (open !== null) log('call-window', { app: 'teams', open })
+let teamsWindow = ''
+
+/**
+ * The Teams call's window opened, closed or went out of sight ('away'), or its
+ * reader stopped (null). Logged when that changes: the reader says it again
+ * whenever the people on screen change.
+ */
+function onTeamsWindow(open: boolean | 'away' | null, where?: string): void {
+  const said = open === 'away' ? `away ${where}` : open === null ? '' : String(open)
+  if (said && said !== teamsWindow) log('call-window', open === 'away' ? { app: 'teams', away: where ?? 'yes' } : { app: 'teams', open })
+  teamsWindow = said
   detector.callWindow('teams', open)
 }
 

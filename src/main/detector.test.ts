@@ -78,6 +78,51 @@ describe('when a Teams call ends', () => {
     expect(events).toEqual(['start'])
   })
 
+  it('keeps recording while the window is out of sight on another desktop', async () => {
+    const { d, events, poll } = detector()
+    await poll(true, 2)
+    d.callWindow('teams', true)
+    await poll(true, 10)
+    d.callWindow('teams', 'away') // switched desktops: Teams can't be read there
+    await poll(true, 40)
+    d.callWindow('teams', true) // back
+    await poll(true, 10)
+    expect(events).toEqual(['start'])
+  })
+
+  it('still ends quickly when the window closes after being out of sight', async () => {
+    const { d, events, poll } = detector()
+    await poll(true, 2)
+    d.callWindow('teams', true)
+    await poll(true, 10)
+    d.callWindow('teams', 'away')
+    await poll(true, 10)
+    d.callWindow('teams', false) // left the call from the other desktop: the window is gone
+    await poll(false, 2)
+    expect(events).toEqual(['start', 'end window'])
+  })
+
+  it('leaves it to the mic while the window is out of sight', async () => {
+    const stillInCall = vi.fn(async () => false)
+    const { d, events, poll } = detector(stillInCall)
+    await poll(true, 2)
+    d.callWindow('teams', true)
+    d.callWindow('teams', 'away')
+    await poll(false, 6)
+    expect(events).toEqual(['start'])
+    await poll(false)
+    expect(events).toEqual(['start', 'end mic'])
+  })
+
+  it("doesn't count a window first seen out of sight as the call's", async () => {
+    const { d, events, poll } = detector()
+    await poll(true, 2)
+    d.callWindow('teams', 'away')
+    d.callWindow('teams', false)
+    await poll(true, 10)
+    expect(events).toEqual(['start'])
+  })
+
   it('falls back to ~20 s of quiet mic when the call window was never seen', async () => {
     const { d, events, poll } = detector()
     await poll(true, 2)
