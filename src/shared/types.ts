@@ -346,6 +346,8 @@ export interface BarView {
 export interface BarNote {
   at: string // "12:40", time into the call
   text: string
+  /** A screenshot or pasted picture; `text` says which. */
+  image?: boolean
 }
 
 /** A task line (`- [ ]`) in a meeting note. The note is the source of truth. */

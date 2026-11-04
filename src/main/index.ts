@@ -194,6 +194,23 @@ function elapsedLabel(): string {
   return h ? `${h}:${p(m)}:${p(s % 60)}` : `${p(m)}:${p(s % 60)}`
 }
 
+const PICTURE_TYPES: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }
+const PICTURE_MAX = 25 * 1024 * 1024
+
+/**
+ * A screenshot or pasted picture from the bar: saved beside the note as
+ * `12-40.png` (the time into the call) and added to the note under that time.
+ * It's listed in the bar too, while that recording is still going.
+ */
+function addPicture(id: string, at: string, data: Buffer, ext: string, label: string): void {
+  const base = at.replace(/:/g, '-')
+  let name = `${base}.${ext}`
+  for (let i = 2; existsSync(join(store.paths.meeting(id), 'attachments', name)); i++) name = `${base}-${i}.${ext}`
+  writeFileSync(join(store.paths.meeting(id), 'attachments', name), data)
+  appendToNote(id, `\`${at}\`\n\n![${label} ${at}](attachments/${name})`)
+  if (recording?.meetingId === id) recording.notes.push({ at, text: label, image: true })
+}
+
 type NavView = { meetingId?: string; settings?: boolean; actions?: boolean }
 
 function showMain(view?: NavView): void {
@@ -1141,8 +1158,8 @@ function registerIpc(): void {
     }
     return barLayout.set(next)
   })
-  handle('bar:screenshot', async () => {
-    if (!recording) return
+  handle('bar:screenshot', async (): Promise<BarNote[]> => {
+    if (!recording) return []
     const id = recording.meetingId
     const stamp = elapsedLabel()
     barWin?.hide()
@@ -1153,13 +1170,16 @@ function registerIpc(): void {
     } finally {
       barWin?.showInactive()
     }
-    if (!png) return
-    let name = `${stamp.replace(/:/g, '-')}.png`
-    for (let i = 2; existsSync(join(store.paths.meeting(id), 'attachments', name)); i++) {
-      name = `${stamp.replace(/:/g, '-')}-${i}.png`
-    }
-    writeFileSync(join(store.paths.meeting(id), 'attachments', name), png)
-    appendToNote(id, `\`${stamp}\`\n\n![Screenshot ${stamp}](attachments/${name})`)
+    if (png) addPicture(id, stamp, png, 'png', 'Screenshot')
+    return recording?.notes ?? []
+  })
+  // A picture pasted into the notes drawer (a snip from Win+Shift+S, a copied image).
+  handle('bar:addImage', (data: ArrayBuffer, type: string): BarNote[] => {
+    if (!recording) return []
+    const ext = PICTURE_TYPES[String(type)]
+    const bytes = data instanceof ArrayBuffer ? Buffer.from(data) : null
+    if (ext && bytes?.length && bytes.length <= PICTURE_MAX) addPicture(recording.meetingId, elapsedLabel(), bytes, ext, 'Image')
+    return recording.notes
   })
   ipcMain.on('bar:stop', () => stopRecording())
   ipcMain.on('bar:openMain', () => recording && showMain({ meetingId: recording.meetingId }))

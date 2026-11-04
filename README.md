@@ -10,7 +10,7 @@ Meeting notes for Windows. Kasha notices when a Teams, Slack, RingCentral or Zoo
    - **Obsidian vault**: optional. Notes go to `Meetings/` in the vault.
 2. Join a call as usual. When **Meeting detected** appears, select **Start transcribing**.
 3. A bar stays at the top of the screen during the call:
-   - **Note** slides out a notes drawer under the bar (above it, if the bar is near the bottom of the screen): type and press Enter to add a timestamped line to the note, as many as you like. The ones added so far are listed in the drawer. Esc or the arrow slides it away again; the bar stays put.
+   - **Note** slides out a notes drawer under the bar (above it, if the bar is near the bottom of the screen): type and press Enter to add a timestamped line to the note, as many as you like. Paste a picture there (a Win+Shift+S snip, a copied image) and it goes into the note with the time too. The ones added so far, screenshots included, are listed in the drawer. Esc or the arrow slides it away again; the bar stays put.
    - **Screenshot** opens the Windows snipping overlay; the image is added to the note.
    - **Stop** ends the recording (a note still in the box is added first). Kasha also stops on its own when the call ends: for Teams, a few seconds after you leave; for other apps, about 20 seconds after they release the mic.
    - The button at the right end minimizes the bar to the Kasha logo, whose sound bars step up and down while it records. Point at the logo to open the bar; it shrinks back a moment after the pointer leaves (not while the notes drawer is out). The pin keeps it open. Kasha remembers the choice for the next call, and the bar (or logo) stays wherever you drag it.
