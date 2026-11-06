@@ -11,7 +11,7 @@ vi.mock('electron', () => ({
     getCursorScreenPoint: () => ({ ...pointer })
   }
 }))
-const { anchorOf, BAR_HEIGHT, BAR_WIDTH, barBounds, BarLayout, LOGO_SIZE, NOTES_HEIGHT } = await import('./bar')
+const { anchorOf, BAR_HEIGHT, BAR_WIDTH, barBounds, BarLayout, EDGE_GAP, LOGO_SIZE, NOTES_HEIGHT, placeFrom, snapped } = await import('./bar')
 const full = { minimized: false, expanded: false, notes: false }
 
 describe('barBounds', () => {
@@ -43,6 +43,46 @@ describe('barBounds', () => {
     const b = barBounds({ x: 4000, y: 2000 }, full, area).bounds
     expect(b).toEqual({ x: 1920 - BAR_WIDTH, y: 1040 - BAR_HEIGHT, width: BAR_WIDTH, height: BAR_HEIGHT })
   })
+
+  it('holds a bar snapped to the right flush with it, as the logo and opened up', () => {
+    const at = { x: 1700, y: 400, side: 'right' as const }
+    const logo = barBounds(at, { ...full, minimized: true }, area).bounds
+    const open = barBounds(at, { minimized: true, expanded: true, notes: false }, area).bounds
+    expect(logo.x + logo.width).toBe(1920 - EDGE_GAP)
+    expect(open.x + open.width).toBe(1920 - EDGE_GAP)
+    expect(open.y).toBe(400)
+  })
+
+  it('holds a bar snapped to the bottom on it, with the drawer above', () => {
+    const r = barBounds({ x: 960, y: 0, edge: 'bottom' }, { ...full, notes: true }, area)
+    expect(r.up).toBe(true)
+    expect(r.bounds.y + NOTES_HEIGHT + BAR_HEIGHT).toBe(1040 - EDGE_GAP)
+  })
+})
+
+describe('snapped', () => {
+  it('snaps to an edge the bar is dragged near or past, and not otherwise', () => {
+    expect(snapped({ x: 960, y: 300 }, full, area)).toEqual({ x: 960, y: 300 })
+    expect(snapped({ x: 1920 - BAR_WIDTH / 2 - 20, y: 300 }, full, area)).toMatchObject({ side: 'right' })
+    expect(snapped({ x: BAR_WIDTH / 2 - 50, y: 300 }, full, area)).toMatchObject({ side: 'left' })
+    expect(snapped({ x: 960, y: 10 }, full, area)).toMatchObject({ edge: 'top' })
+    expect(snapped({ x: 960, y: 1040 - BAR_HEIGHT - 10 }, full, area)).toMatchObject({ edge: 'bottom' })
+  })
+
+  it('measures the logo by its own size', () => {
+    const logo = { ...full, minimized: true }
+    expect(snapped({ x: 1920 - 40, y: 300 }, logo, area).side).toBe('right')
+    expect(snapped({ x: 1920 - 40, y: 300 }, full, area).side).toBe('right') // the full bar is past the edge
+    expect(snapped({ x: 1920 - 100, y: 300 }, logo, area).side).toBeUndefined()
+  })
+})
+
+describe('placeFrom', () => {
+  it('reads back a saved place and nothing else', () => {
+    expect(placeFrom({ x: 10.4, y: 20, side: 'right', edge: 'sideways' })).toEqual({ x: 10, y: 20, side: 'right' })
+    expect(placeFrom({ x: '10', y: 20 })).toBeNull()
+    expect(placeFrom(null)).toBeNull()
+  })
 })
 
 class FakeWindow extends EventEmitter {
@@ -60,9 +100,9 @@ describe('BarLayout', () => {
   })
   afterEach(() => vi.useRealTimers())
 
-  const minimized = () => {
+  const minimized = (onPlaced = (_at: unknown) => undefined) => {
     const win = new FakeWindow()
-    const layout = new BarLayout(win as unknown as BrowserWindow, true, null, () => undefined)
+    const layout = new BarLayout(win as unknown as BrowserWindow, true, null, () => undefined, onPlaced)
     return { win, layout }
   }
 
@@ -100,12 +140,60 @@ describe('BarLayout', () => {
     expect(win.bounds.width).toBe(BAR_WIDTH)
   })
 
-  it('shrinks to wherever the user dragged the bar', () => {
+  it('follows the pointer while dragged, by the point it was picked up at, and remembers where it was dropped', () => {
+    const placed: unknown[] = []
+    const { win, layout } = minimized((at) => void placed.push(at))
+    layout.set({ expanded: true })
+    Object.assign(pointer, { x: 700, y: 30 }) // on the bar, 40 px in from its left end
+    layout.startDrag({ x: 40, y: 18 })
+    Object.assign(pointer, { x: 400, y: 330 })
+    vi.advanceTimersByTime(16)
+    expect(win.bounds).toMatchObject({ x: 360, y: 312, width: BAR_WIDTH })
+    Object.assign(pointer, { x: 140, y: 288 })
+    vi.advanceTimersByTime(16)
+    layout.dropDrag()
+    expect(win.bounds).toMatchObject({ x: 100, y: 270 })
+    expect(placed).toEqual([{ x: 100 + BAR_WIDTH / 2, y: 270 }])
+    layout.set({ expanded: false })
+    expect(win.bounds).toEqual({ x: 100 + BAR_WIDTH / 2 - LOGO_SIZE / 2, y: 270, width: LOGO_SIZE, height: LOGO_SIZE })
+  })
+
+  it('stays the same size while dragged, though the pointer is away from where the bar was', () => {
     const { win, layout } = minimized()
     layout.set({ expanded: true })
-    win.bounds = { ...win.bounds, x: 100, y: 300 }
-    win.emit('moved')
-    layout.set({ expanded: false })
-    expect(win.bounds).toEqual({ x: 100 + BAR_WIDTH / 2 - LOGO_SIZE / 2, y: 300, width: LOGO_SIZE, height: LOGO_SIZE })
+    Object.assign(pointer, { x: 700, y: 30 })
+    layout.startDrag({ x: 40, y: 18 })
+    Object.assign(pointer, { x: 1200, y: 600 })
+    vi.advanceTimersByTime(3000)
+    expect(win.bounds.width).toBe(BAR_WIDTH)
+    layout.dropDrag()
+    expect(win.bounds).toMatchObject({ x: 1160, y: 582 })
+  })
+
+  it('snaps to the right edge as it is dragged there, and stays there as the logo', () => {
+    const { win, layout } = minimized()
+    Object.assign(pointer, { x: 960, y: 36 }) // the middle of the logo
+    layout.startDrag({ x: 24, y: 24 })
+    Object.assign(pointer, { x: 1900, y: 500 })
+    vi.advanceTimersByTime(16)
+    layout.dropDrag()
+    expect(win.bounds).toEqual({ x: 1920 - EDGE_GAP - LOGO_SIZE, y: 476, width: LOGO_SIZE, height: LOGO_SIZE })
+    expect(layout.anchor().side).toBe('right')
+  })
+
+  it('a logo just dropped stays small until the pointer has left it', () => {
+    const { win, layout } = minimized()
+    Object.assign(pointer, { x: 960, y: 36 })
+    layout.startDrag({ x: 24, y: 24 })
+    Object.assign(pointer, { x: 500, y: 536 })
+    vi.advanceTimersByTime(16)
+    layout.dropDrag()
+    vi.advanceTimersByTime(1000)
+    expect(win.bounds.width).toBe(LOGO_SIZE)
+    Object.assign(pointer, { x: 100, y: 100 })
+    vi.advanceTimersByTime(200)
+    Object.assign(pointer, { x: 500, y: 536 })
+    vi.advanceTimersByTime(300)
+    expect(win.bounds.width).toBe(BAR_WIDTH)
   })
 })

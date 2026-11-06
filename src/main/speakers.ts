@@ -261,6 +261,28 @@ export function forgetSpeakers(meetingId: string, ids: SpeakerId[]): void {
   writeFileSync(embeddingsFile(meetingId), JSON.stringify(prints))
 }
 
+/**
+ * A meeting combined into another: its voiceprints, and what was learned
+ * from them, carry over under the speakers' ids there. Someone in both keeps
+ * the earlier part's voiceprint.
+ */
+export function moveMeetingVoices(from: string, to: string, ids: Partial<Record<SpeakerId, SpeakerId>>): void {
+  if (existsSync(embeddingsFile(from))) {
+    const src = readEmbeddings(from)
+    const dest: SpeakerPrints = existsSync(embeddingsFile(to)) ? readEmbeddings(to) : { model: src.model, voices: {} }
+    // Voiceprints from different models can't stand for one person.
+    if (dest.model === src.model) {
+      for (const [id, p] of Object.entries(src.voices) as Array<[SpeakerId, { v: number[]; capped?: boolean }]>) {
+        const at = ids[id]
+        if (at && at !== 'others' && p && !dest.voices[at]) dest.voices[at] = p
+      }
+      writeFileSync(embeddingsFile(to), JSON.stringify(dest))
+    }
+    rmSync(embeddingsFile(from), { force: true })
+  }
+  voices.rekey(from, to, ids)
+}
+
 /** Forgets a meeting's voiceprints and whatever was learned from them. */
 export function forgetMeetingVoices(meetingId: string): void {
   voices.unenrollMeeting(meetingId)

@@ -1,9 +1,11 @@
 import { Download, ExternalLink, Loader2, Pause, Play, RefreshCw, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { sameCall, startOf } from '@shared/combine'
 import { normTag, type AudioInfo, type BackgroundState, type Meeting, type RecordingInfo, type Settings, type TranscriptSegment } from '@shared/types'
 import { cn, hhmm, meetingMeta, timer } from '@/lib/utils'
 import { Ask } from './Ask'
 import { Attendees } from './Attendees'
+import { CombineNotes } from './CombineNotes'
 import { CorrectWord, type WordAt } from './CorrectWord'
 import { DeleteNote } from './DeleteNote'
 import { Editor } from './Editor'
@@ -20,6 +22,13 @@ interface Props {
   settings: Settings
   /** Tags on any note, for suggestions. */
   allTags: string[]
+  /** Every note, to offer ones from the same call to combine with. */
+  meetings: Meeting[]
+}
+
+interface CombineState {
+  open: boolean
+  setOpen: (open: boolean) => void
 }
 
 type Tab = 'notes' | 'transcript' | 'attendees' | 'ask'
@@ -67,7 +76,7 @@ function Title({ meeting }: { meeting: Meeting }) {
   )
 }
 
-function Actions({ meeting, recording, progress, background, settings, hasTranscript }: Props & { hasTranscript: boolean }) {
+function Actions({ meeting, recording, progress, background, settings, meetings, hasTranscript, combine }: Props & { hasTranscript: boolean; combine: CombineState }) {
   const now = useNow(!!recording)
   const isThis = recording?.meetingId === meeting.id
 
@@ -157,6 +166,7 @@ function Actions({ meeting, recording, progress, background, settings, hasTransc
         </Button>
       )}
       <SharePopover meeting={meeting} hasTranscript={hasTranscript} />
+      <CombineNotes meeting={meeting} meetings={meetings} settings={settings} open={combine.open} onOpenChange={combine.setOpen} />
       <DeleteNote meeting={meeting} settings={settings} />
     </div>
   )
@@ -193,6 +203,25 @@ function Notice({ meeting }: { meeting: Meeting }) {
   if (meeting.sync.state === 'error')
     return <p className="rounded-md bg-destructive/10 px-3 py-2 text-[13px] text-destructive">{meeting.sync.error}</p>
   return null
+}
+
+/** Another note looks like the same call (cut off, or left and rejoined): offers to combine them. */
+function SameCall({ meeting, other, onCombine }: { meeting: Meeting; other: Meeting; onCombine: () => void }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md bg-foreground/5 px-3 py-2 text-[13px] text-muted">
+      <span>
+        This looks like the same call as the note from {hhmm(new Date(startOf(other)))}. Combine them into one note, with one transcript and summary?
+      </span>
+      <span className="flex gap-1">
+        <Button size="sm" onClick={onCombine}>
+          Combine…
+        </Button>
+        <Button variant="ghost" size="sm" onClick={() => void window.kasha.updateMeeting(meeting.id, { notSameCall: other.id })}>
+          Not the same call
+        </Button>
+      </span>
+    </div>
+  )
 }
 
 /** The recording is still on this PC: when it goes, and how to keep or drop it. */
@@ -298,6 +327,8 @@ export function NoteView(props: Props) {
     const was = prevStatus.current
     prevStatus.current = meeting.status
     if (was !== meeting.status && (was === 'transcribing' || was === 'separating' || was === 'summarizing')) reload()
+    // Rewritten before the summary starts: notes combined into this one.
+    else if (was === 'ready' && meeting.status === 'summarizing') reload()
     else if (was === 'recording' && meeting.status !== 'recording') refreshAudio()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meeting.status, meeting.id])
@@ -327,6 +358,8 @@ export function NoteView(props: Props) {
     const t = window.setTimeout(() => setCorrected(null), 4000)
     return () => window.clearTimeout(t)
   }, [corrected])
+  const [combining, setCombining] = useState(false)
+  const rejoined = props.meetings.find((m) => sameCall(meeting, m))
   const syncedAt = meeting.sync.state === 'synced' && meeting.sync.at ? ` · Synced ${hhmm(new Date(meeting.sync.at))}` : ''
 
   return (
@@ -339,7 +372,7 @@ export function NoteView(props: Props) {
             {syncedAt}
           </div>
         </div>
-        <Actions {...props} hasTranscript={!!data?.transcript.length} />
+        <Actions {...props} hasTranscript={!!data?.transcript.length} combine={{ open: combining, setOpen: setCombining }} />
       </header>
 
       <div role="tablist" className="mt-5 flex gap-6 border-b border-border px-10 max-[820px]:px-6">
@@ -361,6 +394,7 @@ export function NoteView(props: Props) {
 
       <div className="flex flex-1 flex-col gap-6 px-10 py-6 max-[820px]:px-6">
         <Notice meeting={meeting} />
+        {rejoined && <SameCall meeting={meeting} other={rejoined} onCombine={() => setCombining(true)} />}
         {data?.audio && meeting.status !== 'recording' && <AudioNotice meeting={meeting} audio={data.audio} onChanged={refreshAudio} />}
         {/* The editor stays mounted on the Transcript tab, so it never shows an older copy of the note. */}
         {data && (

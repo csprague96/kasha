@@ -169,6 +169,24 @@ export function unenrollMeeting(meetingId: string): void {
   if (count(after) !== count(before)) save(after)
 }
 
+/** A meeting combined into another: what was learned from it is filed under that one, by the speakers' new ids. */
+export function rekey(from: string, to: string, ids: Partial<Record<SpeakerId, SpeakerId>>): void {
+  if (!existsSync(file())) return
+  let moved = 0
+  const voices = load()
+    .map((voice) => ({
+      ...voice,
+      samples: voice.samples.flatMap((s) => {
+        if (s.meetingId !== from) return [s]
+        moved++
+        const speaker = ids[s.speaker]
+        return speaker && speaker !== 'others' ? [{ ...s, meetingId: to, speaker }] : []
+      })
+    }))
+    .filter((x) => x.samples.length)
+  if (moved) save(voices)
+}
+
 /** Forgets samples from meetings that no longer exist. */
 export function prune(meetingIds: Set<string>): void {
   if (!existsSync(file())) return

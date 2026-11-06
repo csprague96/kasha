@@ -1,9 +1,9 @@
 import { ArrowLeftRight, Check, ChevronDown, ChevronUp, Pencil, Play, Replace, Square, UserMinus, X } from 'lucide-react'
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { removeSpeaker, sameSpeaker, speakerTurns } from '@shared/speakers'
 import { countMatches, findPattern } from '@shared/text'
 import { speakerName, type Meeting, type SpeakerId, type TranscriptSegment } from '@shared/types'
-import { clock, cn } from '@/lib/utils'
+import { clock, cn, hhmm } from '@/lib/utils'
 import { CorrectWord, wordAtPoint, type WordAt } from './CorrectWord'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -974,50 +974,60 @@ export function Transcript({ meeting, segments, note, live, liveEnabled, onSave,
           const mine = shownId === s.speaker
           const name = speakerName(s.speaker, meeting.speakers)
           const playing = player.playing === s
+          // Notes combined from one call: where each later part begins.
+          const part = meeting.parts?.find((p) => p.at <= s.start && (i === 0 || p.at > segments[i - 1].start))
           return (
-            <li
-              key={`${s.start}-${i}`}
-              data-line={i}
-              // The padding lets a highlighted turn read as one block; the margins take it back out of the spacing.
-              className={cn(
-                'group -mx-2 -mb-1.5 grid grid-cols-[64px_112px_1fr] gap-2 px-2 py-1.5 leading-relaxed transition-colors duration-200',
-                turnStart && i > 0 ? 'mt-0.5' : '-mt-1.5',
-                mine && (i >= from && i <= to ? 'bg-primary/10' : 'bg-primary/[0.04]'),
-                mine && turnStart && 'rounded-t-md',
-                mine && turnEnd && 'rounded-b-md'
+            <Fragment key={`${s.start}-${i}`}>
+              {part && (
+                <li role="separator" className="my-1 flex items-center gap-3 text-xs text-muted">
+                  <span className="h-px flex-1 bg-border" />
+                  Rejoined at {hhmm(new Date(part.startedAt))}
+                  <span className="h-px flex-1 bg-border" />
+                </li>
               )}
-            >
-              {player.canPlay ? (
-                // The time plays the line, to hear who said it.
-                <button
-                  onClick={() => player.toggle(s)}
-                  aria-label={playing ? 'Stop' : `Play ${name} at ${clock(s.start)}`}
-                  title={playing ? 'Stop' : 'Play this line'}
-                  className={cn(
-                    'tabular inline-flex items-center gap-1 self-start rounded pt-[3px] text-left font-mono text-xs hover:text-primary hover:underline',
-                    playing ? 'text-primary' : 'text-muted'
-                  )}
-                >
-                  {clock(s.start)}
-                  {playing ? (
-                    <Square className="size-2 shrink-0 fill-current" />
-                  ) : (
-                    <Play className="size-2.5 shrink-0 fill-current opacity-0 group-hover:opacity-100" />
-                  )}
-                </button>
-              ) : (
-                <span className="tabular pt-[3px] font-mono text-xs text-muted">{clock(s.start)}</span>
-              )}
-              <div className="flex min-w-0 items-start">
-                <LineSpeaker
-                  {...nameProps(s.speaker)}
-                  seg={s}
-                  show={turnStart}
-                  onMoveLine={onSave && ((speaker) => speaker !== s.speaker && edit(i, { speaker }))}
-                />
-              </div>
-              <LineText text={s.text} re={re} onSave={onSave && ((text) => edit(i, { text }))} onCorrect={setCorrect} />
-            </li>
+              <li
+                data-line={i}
+                // The padding lets a highlighted turn read as one block; the margins take it back out of the spacing.
+                className={cn(
+                  'group -mx-2 -mb-1.5 grid grid-cols-[64px_112px_1fr] gap-2 px-2 py-1.5 leading-relaxed transition-colors duration-200',
+                  turnStart && i > 0 ? 'mt-0.5' : '-mt-1.5',
+                  mine && (i >= from && i <= to ? 'bg-primary/10' : 'bg-primary/[0.04]'),
+                  mine && turnStart && 'rounded-t-md',
+                  mine && turnEnd && 'rounded-b-md'
+                )}
+              >
+                {player.canPlay ? (
+                  // The time plays the line, to hear who said it.
+                  <button
+                    onClick={() => player.toggle(s)}
+                    aria-label={playing ? 'Stop' : `Play ${name} at ${clock(s.start)}`}
+                    title={playing ? 'Stop' : 'Play this line'}
+                    className={cn(
+                      'tabular inline-flex items-center gap-1 self-start rounded pt-[3px] text-left font-mono text-xs hover:text-primary hover:underline',
+                      playing ? 'text-primary' : 'text-muted'
+                    )}
+                  >
+                    {clock(s.start)}
+                    {playing ? (
+                      <Square className="size-2 shrink-0 fill-current" />
+                    ) : (
+                      <Play className="size-2.5 shrink-0 fill-current opacity-0 group-hover:opacity-100" />
+                    )}
+                  </button>
+                ) : (
+                  <span className="tabular pt-[3px] font-mono text-xs text-muted">{clock(s.start)}</span>
+                )}
+                <div className="flex min-w-0 items-start">
+                  <LineSpeaker
+                    {...nameProps(s.speaker)}
+                    seg={s}
+                    show={turnStart}
+                    onMoveLine={onSave && ((speaker) => speaker !== s.speaker && edit(i, { speaker }))}
+                  />
+                </div>
+                <LineText text={s.text} re={re} onSave={onSave && ((text) => edit(i, { text }))} onCorrect={setCorrect} />
+              </li>
+            </Fragment>
           )
         })}
       </ol>

@@ -51,6 +51,12 @@ export interface KashaApi {
    * too. `remember` saves the choice as Settings' `obsidian.onDelete`.
    */
   deleteMeeting(id: string, opts?: { obsidian?: boolean; remember?: boolean }): Promise<void>
+  /**
+   * Combines notes from one call (cut off, or left and rejoined) into the
+   * earliest of them, then writes one summary for the whole call. The others
+   * are deleted; with `obsidian`, their Obsidian copies go to the Recycle Bin.
+   */
+  combineNotes(ids: string[], opts?: { obsidian?: boolean }): Promise<Meeting>
   retry(id: string): Promise<void>
   syncNow(id: string): Promise<void>
   revealInObsidian(id: string): Promise<void>
@@ -172,6 +178,9 @@ export interface BarApi {
   /** Minimize, open the notes drawer, or open up the minimized bar. The window is resized to fit. */
   setView(patch: Partial<Pick<BarView, 'minimized' | 'notes' | 'expanded'>>): Promise<BarView>
   onView(cb: (v: BarView) => void): () => void
+  /** The pointer, pressed at (x, y) in the bar's window, started dragging: the bar follows it until dragEnd. */
+  dragStart(x: number, y: number): void
+  dragEnd(): void
 }
 
 declare global {

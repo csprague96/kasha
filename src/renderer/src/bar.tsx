@@ -1,5 +1,5 @@
 import { Camera, ChevronDown, ChevronUp, Image as ImageIcon, Minimize2, Pause, PenLine, Pin, Play } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { BarNote, BarView, LiveState, RecordingInfo } from '@shared/types'
 import { Logo } from './components/Logo'
@@ -105,6 +105,62 @@ async function startCapture(): Promise<Capture> {
 }
 
 // ---------- UI ----------
+
+/** How far the pointer moves, pressed, before it's a drag and not a click. */
+const DRAG_START = 4
+
+/**
+ * Moving the bar: press anywhere on it, its buttons too, and drag. The main
+ * process moves the window (see BarLayout); a press that didn't move is a
+ * plain click, and one that did isn't also a click on the button it started on.
+ */
+function useBarDrag() {
+  const dragged = useRef(false)
+  const onPointerDown = (e: ReactPointerEvent<HTMLElement>) => {
+    if (e.button !== 0) return
+    const el = e.currentTarget
+    const { pointerId, screenX: sx, screenY: sy, clientX, clientY } = e
+    let dragging = false
+    dragged.current = false
+    const move = (ev: PointerEvent) => {
+      if (dragging || Math.hypot(ev.screenX - sx, ev.screenY - sy) < DRAG_START) return
+      dragging = true
+      dragged.current = true
+      // Captured only now: captured from the press, the click would land on the bar, not the button pressed.
+      el.setPointerCapture(pointerId)
+      window.bar.dragStart(clientX, clientY)
+    }
+    const end = () => {
+      el.removeEventListener('pointermove', move)
+      el.removeEventListener('pointerup', end)
+      el.removeEventListener('lostpointercapture', end)
+      if (dragging) window.bar.dragEnd()
+    }
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', end)
+    el.addEventListener('lostpointercapture', end)
+  }
+  const onClickCapture = (e: ReactMouseEvent) => {
+    if (!dragged.current) return
+    dragged.current = false
+    e.preventDefault()
+    e.stopPropagation()
+  }
+  return { onPointerDown, onClickCapture }
+}
+
+/** The K with the red recording dot: the minimized bar, and the handle at the start of the full one. */
+function RecordingMark({ beat, size }: { beat: number; size: 'logo' | 'handle' }) {
+  return (
+    <>
+      <Logo size={size === 'logo' ? 17 : 15} beat={beat} />
+      <span
+        className={cn('absolute rounded-full bg-record ring-2 ring-surface', size === 'logo' ? 'top-0.5 right-0.5 size-2' : 'top-0 right-0 size-1.5')}
+        aria-hidden="true"
+      />
+    </>
+  )
+}
 
 /**
  * A picture pasted on its own: a snip, a copied image. Not one that comes with
@@ -216,6 +272,7 @@ function Bar() {
   const [draft, setDraft] = useState('')
   const [closing, setClosing] = useState(false)
   const capture = useRef<Promise<Capture> | null>(null)
+  const drag = useBarDrag()
 
   useEffect(() => {
     void window.bar.info().then(setInfo)
@@ -284,23 +341,23 @@ function Bar() {
   const paused = live?.paused ?? null
 
   if (view.minimized && !view.expanded && !view.notes) {
-    const label = `Recording, ${elapsed}${paused ? ', transcribing paused' : ''}. Point at it to open the bar.`
+    const label = `Recording, ${elapsed}${paused ? ', transcribing paused' : ''}. Point at it to open the bar, or drag it somewhere else.`
     return (
       <div className="flex h-full items-center justify-center p-1">
         <button
+          {...drag}
           onClick={() => void window.bar.setView({ expanded: true })}
           title={label}
           aria-label={label}
-          className="bar-pop relative flex size-10 items-center justify-center rounded-full border border-border bg-surface"
+          className="bar-pop relative flex size-10 cursor-grab touch-none items-center justify-center rounded-full border border-border bg-surface active:cursor-grabbing"
         >
-          <Logo size={17} beat={Math.floor(now / 500)} />
-          <span className="absolute top-0.5 right-0.5 size-2 rounded-full bg-record ring-2 ring-surface" aria-hidden="true" />
+          <RecordingMark size="logo" beat={Math.floor(now / 500)} />
         </button>
       </div>
     )
   }
 
-  const pill = 'rounded-full border border-border px-2.5 py-1 font-medium [-webkit-app-region:no-drag]'
+  const pill = 'rounded-full border border-border px-2.5 py-1 font-medium'
   const pauseLabel =
     paused === 'user'
       ? 'Resume transcribing'
@@ -312,19 +369,21 @@ function Bar() {
   return (
     <div className={cn('flex h-full flex-col gap-1.5 p-1', view.up && 'flex-col-reverse')}>
       <div
+        {...drag}
         className={cn(
-          'flex h-12 w-full shrink-0 items-center gap-3 rounded-full border border-border bg-surface py-1.5 pr-1.5 pl-3.5 text-[13px] [-webkit-app-region:drag]',
+          'flex h-12 w-full shrink-0 touch-none items-center gap-3 rounded-full border border-border bg-surface py-1.5 pr-1.5 pl-1.5 text-[13px] select-none',
           view.minimized && 'bar-pop'
         )}
       >
-        <span className="size-2 shrink-0 rounded-full bg-record" aria-hidden="true" />
-        <span className="tabular shrink-0 font-mono text-xs font-medium">{elapsed}</span>
-
-        <button
-          onClick={() => window.bar.openMain()}
-          title="Open note"
-          className="min-w-0 flex-1 truncate text-left [-webkit-app-region:no-drag]"
+        <span
+          title="Drag to move the bar. Drop it by a screen edge to keep it there."
+          className="relative flex size-9 shrink-0 cursor-grab items-center justify-center rounded-full border border-border active:cursor-grabbing"
         >
+          <RecordingMark size="handle" beat={Math.floor(now / 500)} />
+        </span>
+        <span className="tabular -ml-1 shrink-0 font-mono text-xs font-medium">{elapsed}</span>
+
+        <button onClick={() => window.bar.openMain()} title="Open note" className="min-w-0 flex-1 truncate text-left">
           {info.title}
           {paused === 'user' && <span className="text-muted"> · transcribing paused</span>}
           {paused === 'memory' && <span className="text-muted"> · transcribing waits for memory</span>}
@@ -363,7 +422,7 @@ function Bar() {
           Stop
         </button>
         <button
-          className="inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted hover:bg-sidebar hover:text-foreground [-webkit-app-region:no-drag]"
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted hover:bg-sidebar hover:text-foreground"
           onClick={() => void window.bar.setView({ minimized: !view.minimized })}
           title={sizeLabel}
           aria-label={sizeLabel}

@@ -24,6 +24,7 @@ const kasha: KashaApi = {
   rememberTerm: (heard, term) => invoke('vocab:remember', heard, term),
   resummarize: (id) => invoke('meetings:resummarize', id),
   deleteMeeting: (id, opts) => invoke('meetings:delete', id, opts),
+  combineNotes: (ids, opts) => invoke('meetings:combine', ids, opts),
   retry: (id) => invoke('meetings:retry', id),
   syncNow: (id) => invoke('meetings:sync', id),
   revealInObsidian: (id) => invoke('meetings:reveal', id),
@@ -109,7 +110,9 @@ const bar: BarApi = {
   onStopRequested: (cb) => on('bar-stop', cb),
   view: () => invoke('bar:view'),
   setView: (patch) => invoke('bar:setView', patch),
-  onView: (cb) => on('bar-view', cb)
+  onView: (cb) => on('bar-view', cb),
+  dragStart: (x, y) => ipcRenderer.send('bar:dragStart', x, y),
+  dragEnd: () => ipcRenderer.send('bar:dragEnd')
 }
 
 contextBridge.exposeInMainWorld('kasha', kasha)

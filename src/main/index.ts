@@ -21,6 +21,7 @@ import { existsSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { freemem } from 'node:os'
 import { basename, join, normalize, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { canCombine, startOf } from '@shared/combine'
 import { goneSpeakers } from '@shared/speakers'
 import { countMatches, findPattern } from '@shared/text'
 import {
@@ -46,7 +47,8 @@ import {
 import { listActions, ReminderScheduler, removeAction, setActionDone } from './actions'
 import { askAbout, findNotes, noteTarget, relatedNotes } from './ask'
 import { audioClip, audioInfo, deleteAudio, exportAudio, startAudioSweeper } from './audio'
-import { BarLayout, type Anchor } from './bar'
+import { BarLayout, placeFrom } from './bar'
+import { combineNotes } from './combine'
 import { lookupMeeting } from './calendar'
 import { log } from './log'
 import { MeetingDetector } from './detector'
@@ -101,8 +103,6 @@ let mainWin: BrowserWindow | null = null
 let toastWin: BrowserWindow | null = null
 let barWin: BrowserWindow | null = null
 let barLayout: BarLayout | null = null
-/** Where the user last put the bar, so a new bar (next call, or capture restarted) opens there. */
-let barAnchor: Anchor | null = null
 let tray: Tray | null = null
 
 let toast: ToastState | null = null
@@ -479,13 +479,19 @@ async function startRecording(meetingId?: string, from?: DetectedMeeting, opts: 
 /** The bar hosts audio capture, so opening it starts capturing. */
 function openBar(): void {
   const win = createBarWindow()
-  const layout = new BarLayout(win, store.getSettings().barMinimized, barAnchor, (view) => {
-    if (!win.isDestroyed()) win.webContents.send('bar-view', view)
-  })
+  // Where the user last put it, so a new bar (next call, or capture restarted) opens there.
+  const layout = new BarLayout(
+    win,
+    store.getSettings().barMinimized,
+    placeFrom(store.getSettings().barAt),
+    (view) => {
+      if (!win.isDestroyed()) win.webContents.send('bar-view', view)
+    },
+    (at) => broadcast('settings-changed', store.setSettings({ barAt: at }))
+  )
   barWin = win
   barLayout = layout
   win.on('closed', () => {
-    barAnchor = layout.anchor()
     if (barWin === win) barWin = null
     if (barLayout === layout) barLayout = null
   })
@@ -825,6 +831,9 @@ function registerIpc(): void {
       }
       clean.attendance = marks
     }
+    if (typeof patch.notSameCall === 'string' && store.getMeeting(patch.notSameCall) && !before?.notSameCall?.includes(patch.notSameCall)) {
+      clean.notSameCall = [...(before?.notSameCall ?? []), patch.notSameCall]
+    }
     const confirm = patch.confirmSpeaker
     if (isSpeakerId(confirm) && before?.speakerGuesses?.[confirm] && before.speakers?.[confirm]) {
       const { [confirm]: _, ...rest } = before.speakerGuesses
@@ -935,6 +944,38 @@ function registerIpc(): void {
       const ob = store.getSettings().obsidian
       broadcast('settings-changed', store.setSettings({ obsidian: { ...ob, onDelete: opts.obsidian ? 'both' : 'kasha' } }))
     }
+  })
+  handle('meetings:combine', async (ids: unknown, opts?: { obsidian?: boolean }) => {
+    const parts = Array.isArray(ids) ? [...new Set(ids.map(String))].map((id) => store.getMeeting(id)).filter((m): m is Meeting => !!m) : []
+    if (parts.length < 2) throw new Error('Pick at least one more note to combine with this one.')
+    if (parts.some((m) => !canCombine(m) || recording?.meetingId === m.id || processing() === m.id)) {
+      throw new Error('A note is still being recorded or finished. Combine them once they’re ready.')
+    }
+    // The notes that go have their Obsidian copies sent to the Recycle Bin first, as when deleting:
+    // if that fails, nothing has changed yet.
+    const kept = [...parts].sort((x, y) => startOf(x) - startOf(y))[0]
+    if (opts?.obsidian) {
+      for (const m of parts) {
+        if (m.id === kept.id) continue
+        for (const file of vaultFiles(m, store.readNote(m.id))) {
+          try {
+            await shell.trashItem(file)
+          } catch (err) {
+            log('obsidian-delete-failed', { error: (err as NodeJS.ErrnoException).code ?? 'unknown' })
+            throw new Error(`Couldn't remove ${basename(file)} from Obsidian. Is it open in another app?`)
+          }
+        }
+      }
+    }
+    const combined = combineNotes(parts)
+    log('combined', { parts: parts.length, lines: store.readTranscript(combined.id).length })
+    const m = store.updateMeeting(combined.id, { status: 'summarizing', error: undefined, summaryFailed: false, summaryOutdated: false })
+    // One summary from the whole call. Synced to Obsidian after, if that's on.
+    enqueue(m.id, pipelineEvents)
+    broadcast('meetings-changed')
+    broadcast('actions-changed')
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('navigate', { meetingId: m.id })
+    return m
   })
   handle('meetings:retry', (id: string) => enqueue(id, pipelineEvents))
   handle('meetings:sync', (id: string) => {
@@ -1180,6 +1221,13 @@ function registerIpc(): void {
     const bytes = data instanceof ArrayBuffer ? Buffer.from(data) : null
     if (ext && bytes?.length && bytes.length <= PICTURE_MAX) addPicture(recording.meetingId, elapsedLabel(), bytes, ext, 'Image')
     return recording.notes
+  })
+  ipcMain.on('bar:dragStart', (e, x: unknown, y: unknown) => {
+    if (e.sender.id !== barWin?.webContents.id || typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) return
+    barLayout?.startDrag({ x, y })
+  })
+  ipcMain.on('bar:dragEnd', (e) => {
+    if (e.sender.id === barWin?.webContents.id) barLayout?.dropDrag()
   })
   ipcMain.on('bar:stop', () => stopRecording())
   ipcMain.on('bar:openMain', () => recording && showMain({ meetingId: recording.meetingId }))
