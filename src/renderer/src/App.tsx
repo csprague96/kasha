@@ -141,6 +141,7 @@ export function App() {
             background={background}
             settings={settings}
             allTags={allTags}
+            meetings={meetings}
           />
         )}
         {view.kind !== 'settings' && view.kind !== 'actions' && !current && (

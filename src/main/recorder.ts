@@ -7,7 +7,7 @@ const BYTES_PER_SEC = SAMPLE_RATE * 2
 const PATCH_EVERY = 10 * BYTES_PER_SEC
 
 /** Streams 16-bit mono PCM to a WAV file. Header sizes are patched as it goes and on close. */
-class WavWriter {
+export class WavWriter {
   private fd: number
   private bytes = 0
   private patched = 0

@@ -65,6 +65,14 @@ export interface Meeting {
   summaryFailed?: boolean
   /** Speakers were renamed or the transcript changed after the summary was written. */
   summaryOutdated?: boolean
+  /**
+   * Later parts of the call, when notes were combined (a call cut off, or left
+   * and rejoined): where each starts in the transcript, in seconds, and when it
+   * was recorded. The first part starts at 0 and isn't listed.
+   */
+  parts?: Array<{ at: number; startedAt: string }>
+  /** Notes the user said aren't the same call as this one, so combining them isn't offered again. */
+  notSameCall?: string[]
   tags: string[]
   sync: {
     state: SyncState
@@ -174,6 +182,8 @@ export interface Settings {
   liveTranscription: boolean
   /** The recording bar starts shrunk to the logo (the bar's own Minimize button sets it). */
   barMinimized: boolean
+  /** Where the user last put the recording bar, so the next one opens there. Null: top middle of the main screen. */
+  barAt: BarPlace | null
   /** Colours for every window. Each has a light and a dark version that follows Windows. */
   theme: Theme
   speakers: {
@@ -241,6 +251,7 @@ export const DEFAULT_SETTINGS: Settings = {
   myName: '',
   liveTranscription: true,
   barMinimized: false,
+  barAt: null,
   theme: 'kasha',
   speakers: { separate: true, recognize: true, fromTeams: true },
   vocabulary: [],
@@ -331,6 +342,19 @@ export interface RecordingInfo {
 }
 
 /** How the recording bar is showing. */
+/**
+ * Where the recording bar sits: the middle of its top edge, in screen
+ * coordinates. It shrinks to and opens from this point. Dropped near a screen
+ * edge, it snaps to it: `side` and `edge` then hold it flush there at any
+ * size, and x or y only say which screen.
+ */
+export interface BarPlace {
+  x: number
+  y: number
+  side?: 'left' | 'right'
+  edge?: 'top' | 'bottom'
+}
+
 export interface BarView {
   /** Shrunk to the logo. Remembered for the next recording. */
   minimized: boolean
@@ -374,6 +398,8 @@ export type MeetingPatch = Partial<Pick<Meeting, 'title' | 'tags' | 'speakers' |
   confirmSpeaker?: SpeakerId
   /** By-hand attendance marks to merge in; null clears one. */
   attendance?: Record<string, Presence | null>
+  /** This note isn't the same call as that one (by id): don't offer to combine them. */
+  notSameCall?: string
 }
 
 export interface ShareOptions {
